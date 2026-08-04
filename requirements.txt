@@ -1,0 +1,11 @@
+gradio==6.22.0
+datasets
+sentence-transformers
+transformers
+torch
+scikit-learn
+huggingface_hub
+joblib
+pandas
+numpy
+matplotlib
