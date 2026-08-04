@@ -29,6 +29,8 @@ All UI copy is English-only by project requirement, regardless of the
 language used in conversation with the assistant that built this.
 """
 
+import re
+
 import matplotlib
 matplotlib.use("Agg")  # headless — no display backend on a Space server
 import matplotlib.pyplot as plt
@@ -185,11 +187,17 @@ def format_metric_cards_html(session_like):
     return f'<div style="display:flex; gap:14px; flex-wrap:wrap; margin-bottom:4px;">{"".join(cards)}</div>'
 
 
-def format_cpt_badge_html(cpt_code, crisis_flag):
+def format_cpt_badge_html(cpt_code, crisis_flag, duration_minutes=None):
     color = CPT_COLORS.get(cpt_code, COLOR_TEXT_SECONDARY)
     soft = CPT_SOFT.get(cpt_code, COLOR_BG)
     label = "CRISIS SESSION" if crisis_flag else "STANDARD SESSION"
     label_color = COLOR_DANGER_TEXT if crisis_flag else COLOR_TEXT_MUTED
+    duration_html = ""
+    if duration_minutes:
+        duration_html = (
+            f'<div style="font-size:12.5px; font-weight:600; color:{COLOR_TEXT_SECONDARY}; '
+            f'margin-top:-2px;">{int(duration_minutes)} min face-to-face</div>'
+        )
     return f"""
     <div style="background:{soft}; border:1px solid {color}33; border-radius:16px;
                 padding:22px 18px; text-align:center; height:100%; box-sizing:border-box;
@@ -197,6 +205,7 @@ def format_cpt_badge_html(cpt_code, crisis_flag):
         {_mono_label(label, label_color)}
         <div style="font-family:{FONT_MONO}; font-size:38px; font-weight:700; color:{color};
                     letter-spacing:-0.02em;">{cpt_code}</div>
+        {duration_html}
         <div style="font-size:11.5px; color:{COLOR_TEXT_MUTED};">Recommended CPT billing code</div>
     </div>"""
 
@@ -252,8 +261,114 @@ def no_session_selected_html():
     return f"""
     <div style="text-align:center; padding:36px 12px; color:{COLOR_TEXT_MUTED};
                 background:{COLOR_CARD}; border:1px dashed {COLOR_BORDER}; border-radius:14px;">
-        Select a session from the history table above to view its full record —
-        metrics, both graphs, CPT code, justification, and strategy — right here on this page.
+        Select a session from the history table (or the "Select Session to Inspect" dropdown) above
+        to view its full record — executive summary, intra-session timeline, CPT code, justification,
+        and strategy — right here on this page.
+    </div>"""
+
+
+# ==============================================================================
+# Patient Summary Header — shown once a patient is selected from the
+# top-level Dropdown, before drilling into any individual session: MRN,
+# primary diagnosis, session count, and overall care-episode trajectory.
+# ==============================================================================
+def format_patient_summary_html(patient_id, history):
+    if not patient_id:
+        return f"""
+        <div style="text-align:center; padding:28px 12px; color:{COLOR_TEXT_MUTED};
+                    background:{COLOR_CARD}; border:1px dashed {COLOR_BORDER}; border-radius:14px;">
+            Select a patient from the dropdown above to view their care episode summary.
+        </div>"""
+
+    if not history:
+        cards = [
+            _card("MRN", patient_id, COLOR_SECONDARY),
+            _card("Total Sessions", "0", COLOR_SECONDARY),
+            _card("Status", "Intake — no recorded sessions yet", COLOR_TEXT_SECONDARY),
+        ]
+        return f'<div style="display:flex; gap:14px; flex-wrap:wrap;">{"".join(cards)}</div>'
+
+    latest, first = history[-1], history[0]
+    diagnosis = latest.get("Primary_Diagnosis") or "—"
+    latest_score, first_score = latest.get("Risk_Score"), first.get("Risk_Score")
+    progress = latest.get("Progress", "—")
+    risk_level = latest.get("Risk_Level", "—")
+    risk_color = risk_level_color(risk_level)
+
+    cards = [
+        _card("MRN", patient_id, COLOR_SECONDARY),
+        _card("Primary Diagnosis", diagnosis),
+        _card("Total Sessions", str(len(history)), COLOR_SECONDARY),
+    ]
+    if latest_score is not None:
+        cards.append(_ring_card("Current Risk Score", float(latest_score) * 10, f"{float(latest_score):.1f}", risk_color))
+    if latest_score is not None and first_score is not None and len(history) > 1:
+        delta = float(latest_score) - float(first_score)
+        trend_color = COLOR_SUCCESS_TEXT if delta < -0.5 else (COLOR_DANGER_TEXT if delta > 0.5 else COLOR_TEXT_SECONDARY)
+        arrow = "↓" if delta < 0 else ("↑" if delta > 0 else "→")
+        cards.append(_card("Risk Trajectory", f"{first_score:.1f} {arrow} {latest_score:.1f}", trend_color))
+    cards.append(_card("Care Episode Progress", progress, COLOR_DANGER_TEXT if "Mixed Signal" in str(progress) else COLOR_ACCENT))
+    return f'<div style="display:flex; gap:14px; flex-wrap:wrap; margin-bottom:4px;">{"".join(cards)}</div>'
+
+
+# ==============================================================================
+# Session Executive Summary — a deterministic, template-built recap of ONE
+# historical session, assembled entirely from already-stored fields (plus,
+# if the transcript was retained, a literal quoted opening line). No model
+# call, no synthesized claims — every fact here is either a stored field or
+# a direct transcript quote, consistent with the project's hallucination-
+# guard posture (see generation.py) and the "zero re-inference" requirement
+# for browsing historical sessions.
+# ==============================================================================
+_LEADING_TIMESTAMP_SPEAKER = re.compile(r"^\s*\[\d{1,2}:\d{2}\]\s*[A-Za-z][A-Za-z .]{0,25}:\s*")
+
+
+def _opening_line(transcript):
+    if not transcript:
+        return None
+    for line in transcript.strip().split("\n"):
+        line = line.strip()
+        if line:
+            return _LEADING_TIMESTAMP_SPEAKER.sub("", line).strip()
+    return None
+
+
+def format_session_summary_html(record):
+    session_num = record.get("Session_Number", "—")
+    diagnosis = record.get("Primary_Diagnosis") or None
+    risk_score = record.get("Risk_Score")
+    risk_level = record.get("Risk_Level", "—")
+    dynamic = record.get("Dynamic", "—")
+    progress = record.get("Progress", "—")
+    crisis = bool(record.get("Crisis_Flag"))
+    cpt = record.get("Target_CPT_Code", "—")
+    risk_color = risk_level_color(risk_level)
+
+    score_text = f"{float(risk_score):.1f}/10" if risk_score is not None else "—"
+    sentence = (
+        f"Session #{session_num}" + (f" ({diagnosis})" if diagnosis else "") +
+        f" recorded a Risk Score of <b style='color:{risk_color};'>{score_text}</b> ({risk_level}), "
+        f"with a {dynamic} interaction dynamic. Progress for this session was classified as "
+        f"&ldquo;{progress}&rdquo;, billed under CPT {cpt}."
+    )
+    if crisis:
+        sentence += f" <b style='color:{COLOR_DANGER_TEXT};'>This session was flagged for crisis-level clinical content.</b>"
+
+    opening = _opening_line(record.get("Transcript"))
+    opening_html = ""
+    if opening:
+        excerpt = opening if len(opening) <= 160 else opening[:157] + "…"
+        opening_html = (
+            f'<div style="margin-top:10px; padding-top:10px; border-top:1px dashed {COLOR_BORDER}; '
+            f'font-style:italic; color:{COLOR_TEXT_SECONDARY};">Session opened: &ldquo;{excerpt}&rdquo;</div>'
+        )
+
+    return f"""
+    <div style="background:{COLOR_CARD}; border:1px solid {COLOR_BORDER}; border-radius:14px; padding:17px 19px;
+                box-shadow:0 3px 10px rgba(16,34,59,0.04);">
+        {_mono_label("Session Executive Summary", COLOR_TEXT_MUTED)}
+        <div style="margin-top:8px; font-size:13.5px; line-height:1.6; color:{COLOR_TEXT_PRIMARY};">{sentence}</div>
+        {opening_html}
     </div>"""
 
 
@@ -375,20 +490,38 @@ def next_session_number(history_records):
     return max(r.get("Session_Number", 0) for r in history_records) + 1
 
 
+HISTORY_TABLE_COLUMNS = ["Session #", "Date/Timestamp", "Risk Score", "Risk Level", "Dynamic Style", "Progress", "CPT Code", "Crisis Flag"]
+
+
+def _format_session_date(record):
+    """Only sessions logged live THIS browser session carry a real
+    Session_Start (recsys.analyze_new_session() derives it from 'now') — the
+    archived dataset has no real per-session date column (see Part 1 schema
+    notes at the top of this module), so historical rows honestly show that
+    rather than a fabricated date."""
+    start = record.get("Session_Start")
+    if start is not None:
+        try:
+            return start.strftime("%b %d, %Y · %H:%M")
+        except AttributeError:
+            pass
+    return "— (archived, no timestamp)"
+
+
 def format_patient_history_df(history_records):
     if not history_records:
-        return pd.DataFrame(columns=["Session #", "Diagnosis", "Risk Score", "Risk Level", "Dynamic", "Progress", "CPT Code", "Crisis"])
+        return pd.DataFrame(columns=HISTORY_TABLE_COLUMNS)
     rows = []
     for r in history_records:
         rows.append({
             "Session #": r.get("Session_Number"),
-            "Diagnosis": r.get("Primary_Diagnosis", "—"),
+            "Date/Timestamp": _format_session_date(r),
             "Risk Score": r.get("Risk_Score", r.get("Predicted_Risk_Score", "—")),
             "Risk Level": r.get("Risk_Level", "—"),
-            "Dynamic": r.get("Dynamic", r.get("Predicted_Dynamic", "—")),
+            "Dynamic Style": r.get("Dynamic", r.get("Predicted_Dynamic", "—")),
             "Progress": r.get("Progress", "—"),
             "CPT Code": r.get("Target_CPT_Code", "—"),
-            "Crisis": "Yes" if r.get("Crisis_Flag") else "No",
+            "Crisis Flag": "Yes" if r.get("Crisis_Flag") else "No",
         })
     return pd.DataFrame(rows)
 
