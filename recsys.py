@@ -136,6 +136,71 @@ def extract_turns(transcript):
     return turns
 
 
+# --- Intra-session timeline parsing (Graph 2 — UI-facing, not part of the ---
+# --- trained feature pipeline above, which deliberately strips timestamps) --
+# extract_turns() above throws the [MM:SS] markers away on purpose, because
+# the trained models were fit on timestamp-free text. Graph 2 needs the
+# opposite: it plots turns BY their timestamp, so this is a parallel parser
+# that keeps them. Reuses the same empirically-tuned CRISIS_KEYWORDS lexicon
+# and the already-loaded sentiment pipeline so "risk spikes" on the timeline
+# stay consistent with what the model itself considers crisis language,
+# rather than inventing a separate ad hoc vocabulary for the chart.
+INTRASESSION_TURN_PATTERN = re.compile(
+    r"^\s*\[(\d{1,2}):(\d{2})\]\s*([A-Za-z][A-Za-z .]{0,25}):\s*(.*)$", re.MULTILINE
+)
+
+
+def parse_intrasession_timeline(transcript):
+    """Returns a list of per-turn dicts, ordered by time, for Graph 2:
+      time_min      — minutes into the session (float, e.g. 12.5)
+      role          — "therapist" | "patient"
+      speaker       — raw speaker label as written in the transcript
+      utterance     — the turn's text
+      crisis_hits   — CRISIS_KEYWORDS terms found in this turn (possibly [])
+      intensity     — a 0-100 heuristic "arousal" score for this turn, built
+                       from sentiment polarity plus a crisis-keyword bonus.
+                       This is a presentation-layer heuristic for visualizing
+                       within-session shifts — NOT a trained model output,
+                       and it plays no role in Risk_Score / Risk_Level /
+                       Crisis_Flag, which come entirely from the models above.
+    Turns without a leading [MM:SS] marker are skipped (nothing to place on
+    the timeline's x-axis for them).
+    """
+    text = transcript if isinstance(transcript, str) else ""
+    turns = []
+    for match in INTRASESSION_TURN_PATTERN.finditer(text):
+        minute_str, second_str, speaker, utterance = match.groups()
+        utterance = utterance.strip()
+        if not utterance:
+            continue
+        time_min = int(minute_str) + int(second_str) / 60.0
+        role = "therapist" if "dr" in speaker.lower() else "patient"
+        lower_utterance = utterance.lower()
+        crisis_hits = [kw for kw in CRISIS_KEYWORDS if kw in lower_utterance]
+
+        try:
+            sentiment_result = _sentiment_pipeline(utterance[:512])[0]
+        except Exception:
+            sentiment_result = {"label": "NEUTRAL", "score": 0.5}
+        if sentiment_result["label"] == "NEGATIVE":
+            base_intensity = sentiment_result["score"] * 65.0
+        else:
+            base_intensity = (1 - sentiment_result["score"]) * 30.0
+        crisis_bonus = min(len(crisis_hits) * 14.0, 40.0)
+        intensity = float(np.clip(base_intensity + crisis_bonus, 0, 100))
+
+        turns.append({
+            "time_min": round(time_min, 2),
+            "role": role,
+            "speaker": speaker.strip(),
+            "utterance": utterance,
+            "crisis_hits": crisis_hits,
+            "intensity": round(intensity, 1),
+        })
+    turns.sort(key=lambda t: t["time_min"])
+    return turns
+
+
 def engineered_features(transcript, session_duration_minutes):
     text = transcript if isinstance(transcript, str) else ""
     words = text.split()

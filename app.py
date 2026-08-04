@@ -17,9 +17,22 @@ Architecture (see prior design discussion in the project):
     from custom CSS, so restyling Tabs into a true left sidebar isn't robust.
     A hand-built sidebar uses only components/classes this file controls.
   - There is no separate hidden "workspace" page — the Sessions page IS the
-    analysis workspace (metrics, crisis graph, justification, CPT badge,
-    strategy), reached either directly or pre-filled via "Start Session"
-    (a Dashboard appointment card) / "Add New Session" (Patients profile).
+    analysis workspace (metrics, both clinical graphs, justification, CPT
+    badge, strategy), reached either directly or pre-filled via "Start
+    Session" (a Dashboard appointment card) / "Add New Session" (Patients
+    profile).
+  - The Sessions workspace shows TWO distinct graphs, not one:
+      Graph 1 — Cross-Session Progress & Trajectory: Risk_Score across this
+        patient's recorded sessions, X = Session Number (recsys.df has no
+        real per-session date column — see Part 1 schema notes).
+      Graph 2 — Intra-Session Clinical Timeline: within the CURRENT session,
+        X = minutes from 0 to session duration. Built by parsing the
+        transcript's [MM:SS] markers (recsys.parse_intrasession_timeline)
+        and plotting per-turn intensity, speaker-role shifts, and
+        crisis-keyword-triggered turns (ui_helpers.build_intrasession_
+        timeline_figure). This is presentation-only — it never feeds back
+        into Risk_Score/Risk_Level/Crisis_Flag, which remain entirely the
+        trained models' output.
   - A single gr.State() dict carries all session-scoped data (logged-in
     doctor, doctor-scoped patient list, current sidebar view, and a
     session_log of newly-analyzed sessions/newly-registered patients).
@@ -302,18 +315,33 @@ def _run_pipeline(transcript, patient_id, duration_minutes, diagnosis_choice):
         status_note = f"*New patient — '{patient_id}' was not found and has been auto-registered as an intake session.*"
 
     cards_html = ui_helpers.format_metric_cards_html(session_result)
+
+    # Graph 1 — cross-session trajectory (prior recorded sessions + this one).
     history_for_plot = recsys.retrieval_index.get_patient_history(patient_id)
     trajectory_fig = ui_helpers.build_risk_trajectory_figure(history_for_plot, session_result)
+
+    # Graph 2 — intra-session timeline, parsed live from THIS transcript's
+    # [MM:SS] markers. Presentation-only; does not feed the trained models.
+    timeline_turns = recsys.parse_intrasession_timeline(transcript)
+    intrasession_fig = ui_helpers.build_intrasession_timeline_figure(
+        timeline_turns, session_result["Session_Duration_minutes"], session_result["Crisis_Flag"],
+    )
+
     cpt_badge_html = ui_helpers.format_cpt_badge_html(session_result["Target_CPT_Code"], session_result["Crisis_Flag"])
     strategy_html = ui_helpers.format_strategy_html(generation_result["Next_Session_Strategy"])
 
-    return status_note, cards_html, trajectory_fig, generation_result["Medical_Necessity_Justification"], cpt_badge_html, strategy_html, session_result, patient_id, is_known
+    return (
+        status_note, cards_html, trajectory_fig, intrasession_fig,
+        generation_result["Medical_Necessity_Justification"], cpt_badge_html, strategy_html,
+        session_result, patient_id, is_known,
+    )
 
 
 def run_session_analysis(transcript, patient_id, duration_minutes, diagnosis_choice, state):
     """Used by the 'Analyze Session' button — persists the result into this
     browser session's in-memory log so it shows up in Patients/Dashboard."""
-    status_note, cards_html, trajectory_fig, justification, cpt_badge_html, strategy_html, session_result, patient_id, is_known = \
+    (status_note, cards_html, trajectory_fig, intrasession_fig, justification,
+     cpt_badge_html, strategy_html, session_result, patient_id, is_known) = \
         _run_pipeline(transcript, patient_id, duration_minutes, diagnosis_choice)
 
     new_state = {
@@ -337,16 +365,16 @@ def run_session_analysis(transcript, patient_id, duration_minutes, diagnosis_cho
     }
     new_state["session_log"][patient_id] = new_state["session_log"].get(patient_id, []) + [logged_record]
 
-    return status_note, cards_html, trajectory_fig, justification, cpt_badge_html, strategy_html, new_state
+    return status_note, cards_html, trajectory_fig, intrasession_fig, justification, cpt_badge_html, strategy_html, new_state
 
 
 def quick_start_analyze(patient_id, transcript, duration_minutes, diagnosis_choice):
     """Used by the Quick Starters — runs the real pipeline live so evaluators
     see it actually work, but doesn't touch session state (a demo run isn't
     meant to permanently add to a clinician's caseload)."""
-    status_note, cards_html, trajectory_fig, justification, cpt_badge_html, strategy_html, _, _, _ = \
+    status_note, cards_html, trajectory_fig, intrasession_fig, justification, cpt_badge_html, strategy_html, _, _, _ = \
         _run_pipeline(transcript, patient_id, duration_minutes, diagnosis_choice)
-    return status_note, cards_html, trajectory_fig, justification, cpt_badge_html, strategy_html
+    return status_note, cards_html, trajectory_fig, intrasession_fig, justification, cpt_badge_html, strategy_html
 
 
 def build_quick_starters():
@@ -387,68 +415,96 @@ def build_quick_starters():
 
 
 # ==============================================================================
-# Design system CSS
+# Design system CSS — palette/type matched to the reference enterprise-EMR
+# mockup (dark navy sidebar, teal primary accent, blue secondary accent,
+# Hanken Grotesk body / IBM Plex Mono for uppercase labels and data figures).
 # ==============================================================================
 CUSTOM_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@500;600;700&display=swap');
+
 :root {
-    --navio-bg: #f4f6fb;
+    --navio-bg: #f5f7fb;
     --navio-card: #ffffff;
-    --navio-border: #e6e9f2;
-    --navio-text: #1a2233;
-    --navio-text-secondary: #667085;
-    --navio-text-muted: #98a2b3;
-    --navio-accent: #0d9488;
-    --navio-accent-soft: #e6f6f4;
-    --navio-sidebar-bg: #101828;
+    --navio-border: #e7edf4;
+    --navio-text: #14223b;
+    --navio-text-secondary: #6b7b90;
+    --navio-text-muted: #9aa7b8;
+    --navio-accent: #06b4ab;
+    --navio-accent-hover: #0a857e;
+    --navio-accent-soft: #e6f7f5;
+    --navio-secondary: #3b6fe0;
+    --navio-sidebar-bg: #0f1b30;
+    --navio-sidebar-border: #1c2c49;
+    --font-body: 'Hanken Grotesk', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 .gradio-container {
     background: var(--navio-bg) !important;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+    font-family: var(--font-body) !important;
 }
+.gradio-container * { font-family: var(--font-body); }
 
 /* ---- Hand-built sidebar ---- */
 #navio_sidebar {
     background: var(--navio-sidebar-bg) !important;
-    border-radius: 16px !important;
-    padding: 20px 14px !important;
+    border-radius: 18px !important;
+    padding: 22px 14px !important;
     display: flex !important;
     flex-direction: column !important;
     gap: 3px !important;
-    min-height: 70vh;
+    min-height: 76vh;
+    box-shadow: 0 10px 30px rgba(9,18,38,0.25);
 }
-.navio-brand-box { color: #fff; font-weight: 800; font-size: 19px; letter-spacing: 0.02em; padding: 6px 10px 24px; }
+.navio-brand-box {
+    color: #fff; font-weight: 800; font-size: 20px; letter-spacing: 0.01em;
+    padding: 6px 12px 26px;
+}
 .navio-brand-box span { color: var(--navio-accent); }
 
 .navio-nav-btn button {
     background: transparent !important;
-    color: #aab3c9 !important;
+    color: #9aa7c4 !important;
     border: none !important;
+    border-left: 3px solid transparent !important;
     box-shadow: none !important;
     text-align: left !important;
     justify-content: flex-start !important;
     border-radius: 8px !important;
     padding: 11px 14px !important;
-    font-weight: 500 !important;
+    font-weight: 600 !important;
     font-size: 14.5px !important;
+    transition: all 0.15s ease !important;
 }
-.navio-nav-btn button:hover { background: rgba(255,255,255,0.07) !important; color: #fff !important; }
-.navio-nav-btn-active button { background: var(--navio-accent) !important; color: #fff !important; font-weight: 600 !important; }
+.navio-nav-btn button:hover { background: rgba(255,255,255,0.06) !important; color: #fff !important; }
+.navio-nav-btn-active button {
+    background: rgba(6,180,171,0.14) !important;
+    color: #fff !important;
+    border-left: 3px solid var(--navio-accent) !important;
+}
 
-.navio-sidebar-footer { margin-top: auto !important; padding: 16px 10px 4px !important; border-top: 1px solid rgba(255,255,255,0.1) !important; color: #aab3c9 !important; font-size: 12.5px !important; line-height: 1.6; }
+.navio-sidebar-footer {
+    margin-top: auto !important; padding: 16px 12px 4px !important;
+    border-top: 1px solid var(--navio-sidebar-border) !important;
+    color: #9aa7c4 !important; font-size: 12.5px !important; line-height: 1.6;
+}
 .navio-sidebar-footer strong { color: #fff; font-size: 13.5px; }
 
 /* ---- Page headers ---- */
-.navio-page-title { font-size: 21px; font-weight: 700; color: var(--navio-text); margin: 4px 0 2px; }
-.navio-page-subtitle { font-size: 13px; color: var(--navio-text-secondary); margin-bottom: 18px; line-height: 1.5; }
+.navio-page-title { font-size: 22px; font-weight: 800; color: var(--navio-text); letter-spacing: -0.01em; margin: 4px 0 2px; }
+.navio-page-subtitle { font-size: 13px; color: var(--navio-text-secondary); margin-bottom: 20px; line-height: 1.55; max-width: 720px; }
+.navio-section-label {
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.09em; text-transform: uppercase;
+    color: var(--navio-text-secondary); font-weight: 600; margin: 22px 0 10px;
+}
 
-/* ---- Generic card wrapper (applied via elem_classes, fully under our control) ---- */
+/* ---- Generic elevated card wrapper (applied via elem_classes) ---- */
 .navio-card {
     background: var(--navio-card) !important;
     border: 1px solid var(--navio-border) !important;
-    border-radius: 12px !important;
-    padding: 18px !important;
-    box-shadow: 0 1px 3px rgba(16,24,40,0.05) !important;
+    border-radius: 16px !important;
+    padding: 20px !important;
+    box-shadow: 0 6px 20px rgba(16,34,59,0.05) !important;
 }
 
 /* ---- Dashboard appointment card action button ---- */
@@ -457,16 +513,21 @@ CUSTOM_CSS = """
     border: none !important;
     color: #fff !important;
     font-weight: 600 !important;
-    border-radius: 8px !important;
+    border-radius: 9px !important;
     font-size: 13px !important;
 }
-.navio-card-action-btn button:hover { background: #0b7d73 !important; }
+.navio-card-action-btn button:hover { background: var(--navio-accent-hover) !important; }
 .navio-schedule-row { align-items: center !important; }
 
 /* ---- Primary action buttons throughout ---- */
 button.primary, .gradio-container button[class*="primary"] {
     background: var(--navio-accent) !important;
     border: none !important;
+    border-radius: 10px !important;
+    font-weight: 700 !important;
+}
+button.primary:hover, .gradio-container button[class*="primary"]:hover {
+    background: var(--navio-accent-hover) !important;
 }
 
 /* ---- Tables: plain HTML <table>/<th>/<td> tags are stable across Gradio
@@ -475,7 +536,8 @@ button.primary, .gradio-container button[class*="primary"] {
 .gradio-container table { border-collapse: collapse !important; font-size: 13px !important; }
 .gradio-container table thead th {
     background: #fafbfd !important; color: var(--navio-text-secondary) !important;
-    font-weight: 600 !important; text-transform: uppercase; font-size: 11px !important; letter-spacing: 0.04em;
+    font-weight: 700 !important; text-transform: uppercase; font-size: 10.5px !important;
+    letter-spacing: 0.05em; font-family: var(--font-mono) !important;
 }
 .gradio-container table td, .gradio-container table th {
     padding: 10px 14px !important; border-bottom: 1px solid var(--navio-border) !important;
@@ -551,7 +613,7 @@ with gr.Blocks(title="NavIO") as demo:
                                 interactive=False,
                             )
                             profile_session_detail = gr.HTML(value="", visible=False)
-                            profile_trajectory_plot = gr.Plot()
+                            profile_trajectory_plot = gr.Plot(label="Graph 1 — Cross-Session Progress & Trajectory")
                             add_session_profile_btn = gr.Button("Add New Session", variant="primary")
 
                 # ---- Sessions page (the analysis workspace) ----
@@ -563,13 +625,18 @@ with gr.Blocks(title="NavIO") as demo:
                         'starts blank — typing an unrecognized Patient ID will auto-register it as a '
                         'new intake patient on submit.</div>'
                     )
+
+                    # ---- Top: input controls ----
                     with gr.Row(elem_classes=["navio-card"]):
                         session_patient_id = gr.Dropdown(
                             label="Patient ID", choices=ALL_PATIENT_IDS, allow_custom_value=True,
                         )
                         session_duration = gr.Number(label="Session Duration (minutes)", value=45, minimum=1)
                         session_diagnosis = gr.Dropdown(label="Primary Diagnosis (override)", choices=DIAGNOSIS_CHOICES, value="Auto-detect")
-                    session_transcript = gr.Textbox(label="Session Transcript", lines=8, placeholder="Paste or type the session transcript here...")
+                    session_transcript = gr.Textbox(
+                        label="Session Transcript", lines=8,
+                        placeholder="Paste or type the session transcript here (use [MM:SS] markers, e.g. \"[00:12] Dr. Carter: ...\", so Graph 2 can plot the intra-session timeline)...",
+                    )
                     analyze_button = gr.Button("Analyze Session", variant="primary")
 
                     # Output components are created with render=False so they can be
@@ -578,7 +645,8 @@ with gr.Blocks(title="NavIO") as demo:
                     # Quick Starters table above the results via explicit .render() calls.
                     session_status = gr.Markdown("", render=False)
                     session_cards = gr.HTML(render=False)
-                    session_trajectory_plot = gr.Plot(label="Risk Trajectory", render=False)
+                    session_trajectory_plot = gr.Plot(label="Graph 1 — Cross-Session Progress & Trajectory", render=False)
+                    session_intrasession_plot = gr.Plot(label="Graph 2 — Intra-Session Clinical Timeline", render=False)
                     justification_box = gr.Textbox(label="Medical Necessity Justification", lines=8, interactive=False, render=False)
                     cpt_badge = gr.HTML(render=False)
                     strategy_output = gr.HTML(label="Next-Session Strategy", render=False)
@@ -589,21 +657,32 @@ with gr.Blocks(title="NavIO") as demo:
                     gr.Examples(
                         examples=build_quick_starters(),
                         inputs=[session_patient_id, session_transcript, session_duration, session_diagnosis],
-                        outputs=[session_status, session_cards, session_trajectory_plot, justification_box, cpt_badge, strategy_output],
+                        outputs=[session_status, session_cards, session_trajectory_plot, session_intrasession_plot, justification_box, cpt_badge, strategy_output],
                         fn=quick_start_analyze,
                         cache_examples=False,
                         label="Quick Starters",
                     )
 
                     session_status.render()
+
+                    # ---- Middle: hard metrics row + the two graphs ----
                     with gr.Group(elem_classes=["navio-card"]):
                         session_cards.render()
-                        session_trajectory_plot.render()
+                    with gr.Row():
+                        with gr.Column(scale=1, elem_classes=["navio-card"]):
+                            session_trajectory_plot.render()
+                        with gr.Column(scale=1, elem_classes=["navio-card"]):
+                            session_intrasession_plot.render()
+
+                    # ---- Document & Billing section ----
+                    gr.HTML('<div class="navio-section-label">Document &amp; Billing</div>')
                     with gr.Row():
                         with gr.Column(scale=2, elem_classes=["navio-card"]):
                             justification_box.render()
                         with gr.Column(scale=1, elem_classes=["navio-card"]):
                             cpt_badge.render()
+
+                    # ---- Bottom: Next-Session Strategy (prominent, own accent card) ----
                     strategy_output.render()
 
     # ==========================================================================
@@ -646,7 +725,7 @@ with gr.Blocks(title="NavIO") as demo:
     analyze_button.click(
         fn=run_session_analysis,
         inputs=[session_transcript, session_patient_id, session_duration, session_diagnosis, app_state],
-        outputs=[session_status, session_cards, session_trajectory_plot, justification_box, cpt_badge, strategy_output, app_state],
+        outputs=[session_status, session_cards, session_trajectory_plot, session_intrasession_plot, justification_box, cpt_badge, strategy_output, app_state],
     )
 
 
