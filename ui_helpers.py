@@ -1,23 +1,29 @@
 """
 NavIO — ui_helpers.py
-Presentation-layer helpers for app.py: the design-system palette, KPI cards,
-CPT badges, dashboard appointment cards, the patient history table, the two
-clinical graphs, and the dataset/session-log merge.
+Presentation-layer helpers for app.py: the design-system palette, KPI/ring
+cards, CPT badges, the calendar-style dashboard schedule, the patient history
+table, both clinical graphs, and the dataset/session-log merge.
 
 Deliberately kept separate from recsys.py/generation.py — this file has no
 ML logic, only formatting. The one exception worth flagging: Graph 2 (the
 intra-session timeline) is FED pre-computed per-turn data from
 recsys.parse_intrasession_timeline() (timestamp parsing, crisis-keyword
 matching, sentiment-based intensity) — this file only lays that data out on
-a chart. Keeping the parsing/scoring in recsys.py preserves the same
-boundary this module has always had.
+a chart (including the proportional time-rescaling and annotation logic,
+which are chart-presentation decisions, not model outputs).
 
 Note on the dataset schema (confirmed from Part 1): NavIO's synthetic
 sessions are numbered 1, 3, 5, 7, 10 (a longitudinal arc with gaps), not
 sequential 1-5, and there is no real per-session timestamp column — history
 is ordered and displayed by Session_Number, not by date. Only a NEW session
 analyzed live in this app has real Session_Start/Session_End values
-(derived from "now" in recsys.analyze_new_session()).
+(derived from "now" in recsys.analyze_new_session()). This module is
+written to accept EITHER a live session_result dict (Predicted_Risk_Score,
+Predicted_Dynamic, Session_Start/End, Crisis_Probability, ...) OR a stored
+historical record dict (Risk_Score, Dynamic, Session_Number, ...) via the
+`_first()` key-agnostic lookup helper below — this is what lets the
+Patients page render a past session's FULL dashboard (metrics, both
+graphs, CPT badge, justification, strategy) inline, with no popup/modal.
 
 All UI copy is English-only by project requirement, regardless of the
 language used in conversation with the assistant that built this.
@@ -27,15 +33,16 @@ import matplotlib
 matplotlib.use("Agg")  # headless — no display backend on a Space server
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
+import matplotlib.lines as mlines
 import pandas as pd
 
 # ==============================================================================
 # Design-system palette — shared with app.py's CUSTOM_CSS so Python-generated
-# HTML (cards, badges) and pure-CSS-styled Gradio components read as one
-# consistent system. Palette + type choices are deliberately matched to the
-# reference enterprise-EMR mockup the project is styled after: a dark navy
-# sidebar, a teal primary accent, and IBM Plex Mono reserved for uppercase
-# labels / data figures (Hanken Grotesk carries all body text).
+# HTML (cards, badges, calendar) and pure-CSS-styled Gradio components read as
+# one consistent system. Palette + type choices are deliberately matched to
+# the reference enterprise-EMR mockup the project is styled after: a dark
+# navy sidebar, a teal primary accent, and IBM Plex Mono reserved for
+# uppercase labels / data figures (Hanken Grotesk carries all body text).
 # ==============================================================================
 COLOR_BG = "#f5f7fb"
 COLOR_CARD = "#ffffff"
@@ -84,6 +91,50 @@ def _mono_label(text, color=COLOR_TEXT_SECONDARY):
     )
 
 
+def _first(d, *keys, default=None):
+    """Key-agnostic lookup: a live session_result dict and a stored
+    historical record dict use different key names for the same concept
+    (Predicted_Risk_Score vs Risk_Score, etc.) — this lets one formatting
+    function serve both without the caller normalizing first."""
+    for key in keys:
+        val = d.get(key)
+        if val is not None:
+            return val
+    return default
+
+
+# ==============================================================================
+# Progress rings — small inline SVG radial indicators for numeric metrics
+# (Risk Score, Crisis Probability). Pure SVG/CSS, no JS, safe inside gr.HTML.
+# ==============================================================================
+def _progress_ring_svg(pct, color, size=62, stroke=7):
+    pct = max(0.0, min(100.0, float(pct)))
+    radius = (size - stroke) / 2
+    circumference = 2 * 3.14159265 * radius
+    offset = circumference * (1 - pct / 100.0)
+    center = size / 2
+    return f"""<svg width="{size}" height="{size}" viewBox="0 0 {size} {size}" style="transform:rotate(-90deg); flex-shrink:0;">
+        <circle cx="{center}" cy="{center}" r="{radius}" fill="none" stroke="{COLOR_BORDER}" stroke-width="{stroke}"/>
+        <circle cx="{center}" cy="{center}" r="{radius}" fill="none" stroke="{color}" stroke-width="{stroke}"
+                stroke-dasharray="{circumference:.2f}" stroke-dashoffset="{offset:.2f}" stroke-linecap="round"/>
+    </svg>"""
+
+
+def _ring_card(label, pct, display_value, color):
+    ring = _progress_ring_svg(pct, color)
+    return f"""
+    <div style="flex:1; min-width:150px; background:{COLOR_CARD}; border:1px solid {COLOR_BORDER};
+                border-radius:14px; padding:13px 16px; box-shadow:0 4px 14px rgba(16,34,59,0.05);
+                display:flex; align-items:center; gap:12px;">
+        <div style="position:relative; width:62px; height:62px; display:flex; align-items:center; justify-content:center; flex-shrink:0;">
+            {ring}
+            <div style="position:absolute; font-size:14px; font-weight:800; color:{COLOR_TEXT_PRIMARY};">{display_value}</div>
+        </div>
+        <div style="font-family:{FONT_MONO}; font-size:10px; color:{COLOR_TEXT_MUTED}; text-transform:uppercase;
+                    letter-spacing:0.08em; font-weight:600; line-height:1.4;">{label}</div>
+    </div>"""
+
+
 # ==============================================================================
 # KPI / metric cards
 # ==============================================================================
@@ -99,22 +150,38 @@ def _card(label, value, accent=COLOR_ACCENT):
     </div>"""
 
 
-def format_metric_cards_html(session_result):
-    """session_result is recsys.analyze_new_session()'s output dict — has
-    Session_Start/Session_End, unlike a raw historical dataset record."""
-    risk_color = risk_level_color(session_result["Risk_Level"])
-    start = session_result["Session_Start"].strftime("%H:%M")
-    end = session_result["Session_End"].strftime("%H:%M")
-    progress = session_result.get("Progress", "—")
+def format_metric_cards_html(session_like):
+    """Accepts EITHER recsys.analyze_new_session()'s live output dict OR a
+    stored historical record dict (dataset row or this-session's logged
+    record) — see module docstring. Risk Score and Crisis Probability (when
+    present) render as progress rings; Risk Level/Dynamic/Progress stay as
+    plain cards since they're categorical, not a 0-100 quantity."""
+    risk_score = _first(session_like, "Predicted_Risk_Score", "Risk_Score")
+    risk_level = _first(session_like, "Risk_Level", default="—")
+    dynamic = _first(session_like, "Predicted_Dynamic", "Dynamic", default="—")
+    progress = _first(session_like, "Progress", default="—")
+    crisis_prob = session_like.get("Crisis_Probability")
+    risk_color = risk_level_color(risk_level)
     progress_accent = COLOR_DANGER_TEXT if "Mixed Signal" in str(progress) else COLOR_ACCENT
 
-    cards = [
-        _card("Session Start / End", f"{start} – {end}", COLOR_SECONDARY),
-        _card("Risk Score", f"{session_result['Predicted_Risk_Score']:.1f} / 10", risk_color),
-        _card("Risk Level", session_result["Risk_Level"], risk_color),
-        _card("Dynamic", session_result["Predicted_Dynamic"]),
-        _card("Progress", progress, progress_accent),
-    ]
+    if session_like.get("Session_Start") and session_like.get("Session_End"):
+        id_card = _card(
+            "Session Start / End",
+            f"{session_like['Session_Start'].strftime('%H:%M')} – {session_like['Session_End'].strftime('%H:%M')}",
+            COLOR_SECONDARY,
+        )
+    else:
+        id_card = _card("Session #", str(session_like.get("Session_Number", "—")), COLOR_SECONDARY)
+
+    cards = [id_card]
+    if risk_score is not None:
+        cards.append(_ring_card("Risk Score / 10", float(risk_score) * 10, f"{float(risk_score):.1f}", risk_color))
+    cards.append(_card("Risk Level", risk_level, risk_color))
+    if crisis_prob is not None:
+        ring_color = COLOR_DANGER_TEXT if float(crisis_prob) >= 0.2 else COLOR_ACCENT
+        cards.append(_ring_card("Crisis Probability", float(crisis_prob) * 100, f"{float(crisis_prob) * 100:.0f}%", ring_color))
+    cards.append(_card("Dynamic", dynamic))
+    cards.append(_card("Progress", progress, progress_accent))
     return f'<div style="display:flex; gap:14px; flex-wrap:wrap; margin-bottom:4px;">{"".join(cards)}</div>'
 
 
@@ -143,12 +210,13 @@ _STRATEGY_ICON_SVG = (
 
 
 def format_strategy_html(strategy_text):
-    """Deliberately the most visually prominent container on the Sessions
-    page — a distinct, soft-accent card rather than a plain textbox — since
-    this is the clinician-facing recommendation the whole pipeline builds
-    toward. The 'clinical judgment required' caption is a direct, visible
-    reminder that this is decision SUPPORT, not an autonomous instruction,
-    consistent with the hallucination-guard framing used in generation.py."""
+    """Deliberately the most visually prominent container wherever it
+    appears — a distinct, soft-accent card rather than a plain textbox —
+    since this is the clinician-facing recommendation the whole pipeline
+    builds toward. The 'clinical judgment required' caption is a direct,
+    visible reminder that this is decision SUPPORT, not an autonomous
+    instruction, consistent with the hallucination-guard framing used in
+    generation.py."""
     icon = _STRATEGY_ICON_SVG.format(color=COLOR_ACCENT)
     return f"""
     <div style="background:linear-gradient(135deg, {COLOR_ACCENT_SOFT}, #ffffff 65%);
@@ -180,16 +248,95 @@ def no_history_html():
     </div>"""
 
 
+def no_session_selected_html():
+    return f"""
+    <div style="text-align:center; padding:36px 12px; color:{COLOR_TEXT_MUTED};
+                background:{COLOR_CARD}; border:1px dashed {COLOR_BORDER}; border-radius:14px;">
+        Select a session from the history table above to view its full record —
+        metrics, both graphs, CPT code, justification, and strategy — right here on this page.
+    </div>"""
+
+
 # ==============================================================================
-# Dashboard appointment cards (replaces a raw gr.Dataframe schedule listing)
+# Dashboard — calendar-style day view. A purely decorative, self-contained
+# hour-ruler visualization (one fully-owned HTML block: no per-component
+# absolute positioning, no assumptions about Gradio's own DOM wrapping, so
+# it renders reliably regardless of Gradio version) gives the "day at a
+# glance" calendar look. Real 1-click entry into a session is handled by
+# separate, ordinary gr.Button components below it — Gradio cannot bind a
+# Python callback to an arbitrary HTML element, so the interactive control
+# has to be a real component, not a click handler baked into this markup.
 # ==============================================================================
-def format_schedule_card_html(entry):
+CALENDAR_START_HOUR = 8
+CALENDAR_END_HOUR = 17
+CALENDAR_PX_PER_HOUR = 60
+CALENDAR_EVENT_MINUTES = 40  # visual block length — the mock schedule has start times only, no explicit duration
+
+
+def _parse_slot_time(time_str):
+    try:
+        hour_str, minute_str = str(time_str).split(":")
+        return int(hour_str), int(minute_str)
+    except (ValueError, AttributeError):
+        return None
+
+
+def build_calendar_strip_html(schedule):
+    """One self-contained HTML/CSS visualization of the day: hour gridlines
+    + labels, and a colored, time-positioned chip per appointment."""
+    total_minutes = (CALENDAR_END_HOUR - CALENDAR_START_HOUR) * 60
+    height_px = (CALENDAR_END_HOUR - CALENDAR_START_HOUR) * CALENDAR_PX_PER_HOUR
+
+    rails = []
+    for hour in range(CALENDAR_START_HOUR, CALENDAR_END_HOUR + 1):
+        top = (hour - CALENDAR_START_HOUR) * CALENDAR_PX_PER_HOUR
+        rails.append(
+            f'<div style="position:absolute; top:{top}px; left:0; right:0; border-top:1px solid {COLOR_BORDER};"></div>'
+            f'<div style="position:absolute; top:{top - 7}px; left:0; font-family:{FONT_MONO}; font-size:10px; '
+            f'color:{COLOR_TEXT_MUTED};">{hour:02d}:00</div>'
+        )
+
+    chips = []
+    for entry in schedule:
+        parsed = _parse_slot_time(entry.get("Time", ""))
+        if parsed is None:
+            continue
+        hour, minute = parsed
+        start_offset_min = (hour - CALENDAR_START_HOUR) * 60 + minute
+        if not (0 <= start_offset_min <= total_minutes):
+            continue
+        top_px = start_offset_min / 60.0 * CALENDAR_PX_PER_HOUR
+        chip_height_px = max(30.0, CALENDAR_EVENT_MINUTES / 60.0 * CALENDAR_PX_PER_HOUR - 4)
+        status = entry.get("Status", "Scheduled")
+        status_color, status_soft = STATUS_COLORS.get(status, (COLOR_TEXT_SECONDARY, COLOR_BG))
+        chips.append(f"""
+        <div style="position:absolute; top:{top_px:.0f}px; left:52px; right:6px; height:{chip_height_px:.0f}px;
+                    background:{status_soft}; border-left:3px solid {status_color}; border-radius:8px;
+                    padding:5px 10px; box-sizing:border-box; overflow:hidden;">
+            <div style="font-family:{FONT_MONO}; font-size:10px; font-weight:700; color:{status_color};">{entry.get('Time', '—')}</div>
+            <div style="font-size:12.5px; font-weight:700; color:{COLOR_TEXT_PRIMARY}; white-space:nowrap;
+                        overflow:hidden; text-overflow:ellipsis;">{entry.get('Patient_ID', '—')}</div>
+        </div>""")
+
+    return f"""
+    <div style="position:relative; height:{height_px}px; margin-left:44px; padding-bottom:4px;
+                border-left:1px solid {COLOR_BORDER};">
+        {''.join(rails)}
+        {''.join(chips)}
+    </div>"""
+
+
+def format_agenda_row_html(entry):
+    """The interactive counterpart to the calendar strip above — same time/
+    status color coding, rendered as an ordinary card next to a real
+    gr.Button (see app.py) so '1-click entry into that patient's session'
+    stays a genuine Gradio click handler rather than an HTML onclick."""
     status = entry.get("Status", "Scheduled")
     status_color, status_soft = STATUS_COLORS.get(status, (COLOR_TEXT_SECONDARY, COLOR_BG))
     return f"""
     <div style="display:flex; align-items:center; justify-content:space-between; gap:16px;
                 background:{COLOR_CARD}; border:1px solid {COLOR_BORDER}; border-radius:14px;
-                padding:15px 19px; box-shadow:0 3px 10px rgba(16,34,59,0.04);">
+                padding:13px 18px; box-shadow:0 3px 10px rgba(16,34,59,0.04);">
         <div style="display:flex; align-items:center; gap:16px;">
             <div style="font-family:{FONT_MONO}; font-size:13.5px; font-weight:700; color:{COLOR_TEXT_PRIMARY};
                         min-width:56px;">{entry.get('Time', '—')}</div>
@@ -246,34 +393,6 @@ def format_patient_history_df(history_records):
     return pd.DataFrame(rows)
 
 
-def format_session_detail_html(record):
-    """Used when a clinician clicks a row in the history table."""
-    justification = record.get("Medical_Necessity_Justification") or "No stored justification text for this session."
-    risk_color = risk_level_color(record.get("Risk_Level", ""))
-    crisis_chip = (
-        f"<span style='color:{COLOR_DANGER_TEXT}; font-weight:700;'>CRISIS</span> &nbsp;|&nbsp; "
-        if record.get("Crisis_Flag") else ""
-    )
-    return f"""
-    <div style="background:{COLOR_CARD}; border:1px solid {COLOR_BORDER}; border-radius:14px; padding:17px 19px;
-                box-shadow:0 3px 10px rgba(16,34,59,0.04);">
-        <div style="font-weight:700; font-size:14px; margin-bottom:8px; color:{COLOR_TEXT_PRIMARY};">
-            Session #{record.get('Session_Number', '—')} &middot; {record.get('Primary_Diagnosis', '—')}
-        </div>
-        <div style="font-size:12.5px; color:{COLOR_TEXT_SECONDARY}; margin-bottom:10px;">
-            {crisis_chip}
-            Risk Score: <b style="color:{risk_color}">{record.get('Risk_Score', '—')}</b>
-            ({record.get('Risk_Level', '—')}) &nbsp;|&nbsp;
-            Dynamic: {record.get('Dynamic', '—')} &nbsp;|&nbsp;
-            Progress: {record.get('Progress', '—')} &nbsp;|&nbsp;
-            CPT: {record.get('Target_CPT_Code', '—')}
-        </div>
-        <div style="font-size:12.5px; color:{COLOR_TEXT_SECONDARY}; line-height:1.55; border-top:1px dashed {COLOR_BORDER}; padding-top:10px;">
-            {justification}
-        </div>
-    </div>"""
-
-
 def format_similar_cases_df(similar_cases):
     if not similar_cases:
         return pd.DataFrame(columns=["Diagnosis", "Trajectory", "Progress", "Similarity"])
@@ -320,10 +439,13 @@ def _empty_figure(message):
 
 # ==============================================================================
 # GRAPH 1 — Cross-Session Progress & Trajectory. X: Session Number, Y: 0-10
-# Risk_Score. Historical scores plus (if provided) the just-analyzed new
-# session's predicted score as a distinct 'in progress' point.
+# Risk_Score. A clean longitudinal line only — no crisis "X" clutter here by
+# design (that belongs to Graph 2's turn-level detail); the ONLY distinct
+# marker on this graph is a star, either for a live in-progress new session
+# or for a specific historical session the clinician selected in the
+# Patients page (mutually exclusive uses of the same visual language).
 # ==============================================================================
-def build_risk_trajectory_figure(history_records, new_session_result=None):
+def build_risk_trajectory_figure(history_records, new_session_result=None, highlight_session_number=None):
     fig, ax = plt.subplots(figsize=(7.0, 3.0), dpi=120)
     fig.patch.set_alpha(0.0)
     ax.patch.set_alpha(0.0)
@@ -338,15 +460,11 @@ def build_risk_trajectory_figure(history_records, new_session_result=None):
 
     x_hist = [r.get("Session_Number") for r in history_records]
     y_hist = [r.get("Risk_Score") for r in history_records]
-    crisis_hist = [bool(r.get("Crisis_Flag")) for r in history_records]
 
     if x_hist:
         ax.plot(x_hist, y_hist, color=COLOR_ACCENT, linewidth=2.2, marker="o",
                 markersize=5.5, markerfacecolor="white", markeredgecolor=COLOR_ACCENT,
                 markeredgewidth=1.8, zorder=2, label="Recorded sessions")
-        for x, y, is_crisis in zip(x_hist, y_hist, crisis_hist):
-            if is_crisis:
-                ax.scatter([x], [y], color=COLOR_DANGER, s=110, zorder=3, marker="X", label="_nolegend_")
 
     if new_session_result is not None:
         new_x = next_session_number(history_records)
@@ -354,9 +472,12 @@ def build_risk_trajectory_figure(history_records, new_session_result=None):
         if x_hist:
             ax.plot([x_hist[-1], new_x], [y_hist[-1], new_y], color=COLOR_TEXT_MUTED,
                      linewidth=1.4, linestyle="--", zorder=1)
-        star_color = COLOR_DANGER if new_session_result["Crisis_Flag"] else COLOR_ACCENT
-        ax.scatter([new_x], [new_y], color=star_color, s=220, marker="*", zorder=4,
+        ax.scatter([new_x], [new_y], color=COLOR_ACCENT, s=220, marker="*", zorder=4,
                    edgecolors="white", linewidths=0.8, label="Current session")
+    elif highlight_session_number is not None and highlight_session_number in x_hist:
+        idx = x_hist.index(highlight_session_number)
+        ax.scatter([x_hist[idx]], [y_hist[idx]], color=COLOR_ACCENT, s=200, marker="*", zorder=4,
+                   edgecolors="white", linewidths=0.8, label="Selected session")
 
     ax.set_xlabel("Session #", fontsize=9, color=COLOR_TEXT_SECONDARY, labelpad=8)
     ax.set_ylabel("Risk Score", fontsize=9, color=COLOR_TEXT_SECONDARY, labelpad=8)
@@ -368,20 +489,50 @@ def build_risk_trajectory_figure(history_records, new_session_result=None):
 
 
 # ==============================================================================
-# GRAPH 2 — Intra-Session Clinical Timeline. X: minutes 0 -> session duration.
-# Plots a per-turn "intensity" line (from recsys.parse_intrasession_timeline)
-# with Safe / Alert / Flooding zone bands, colors each turn marker by speaker
-# role (communication shifts), and calls out crisis-keyword turns explicitly.
+# GRAPH 2 — Intra-Session Clinical Timeline. X: minutes 0 -> session duration
+# (ALWAYS the full axis — see _rescale_turns below). Plots a per-turn
+# "intensity" line with Safe/Alert/Flooding zone bands, colors each turn
+# marker by speaker role, and adds clinical annotations grounded directly in
+# the transcript evidence: crisis keywords (with the matched term(s)),
+# abrupt sentiment shifts, and extended silences between turns.
 # ==============================================================================
+def _median(values):
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    return ordered[mid] if n % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def _rescale_turns(timeline_turns, duration_minutes):
+    """The transcript's literal [MM:SS] timestamps often only span a short
+    excerpt of the full session (true of every built-in Quick Starter, and
+    common for partial real transcripts too) — plotted literally, every
+    turn lands in the first minute or two and the rest of a 45/60-minute
+    axis sits empty. This stretches parsed turn times proportionally across
+    [0, duration_minutes] so the curve always fills the axis, while keeping
+    each turn's ORIGINAL mm:ss (unscaled) for annotation text, so labels
+    still show the real transcript timestamp, not the rescaled position."""
+    raw_times = [t["time_min"] for t in timeline_turns]
+    raw_span = max(raw_times) if raw_times else 0.0
+    scale = (duration_minutes / raw_span) if raw_span > 0 else 1.0
+    scaled = []
+    for t in timeline_turns:
+        scaled.append({**t, "plot_x": t["time_min"] * scale})
+    return scaled, raw_span, scale
+
+
 def build_intrasession_timeline_figure(timeline_turns, duration_minutes, crisis_flag=False):
     if not timeline_turns:
         return _empty_figure("No [MM:SS] timestamps found in this transcript —\nGraph 2 requires timestamped turns, e.g. \"[00:12] Dr. Carter: ...\"")
 
+    duration_minutes = float(duration_minutes or 0) or 45.0
+    turns, raw_span, scale = _rescale_turns(timeline_turns, duration_minutes)
+
     fig, ax = plt.subplots(figsize=(7.0, 3.0), dpi=120)
     fig.patch.set_alpha(0.0)
     ax.patch.set_alpha(0.0)
-
-    x_max = max(float(duration_minutes or 0), max(t["time_min"] for t in timeline_turns)) + 1.0
 
     # Safe / Alert / Flooding zone bands (matches the clinical language used
     # elsewhere in the project's reference materials for arousal/regulation).
@@ -389,37 +540,66 @@ def build_intrasession_timeline_figure(timeline_turns, duration_minutes, crisis_
     ax.axhspan(40, 70, color=COLOR_WARNING, alpha=0.07, zorder=0)
     ax.axhspan(70, 100, color=COLOR_DANGER, alpha=0.07, zorder=0)
     for y, txt in [(20, "Safe"), (55, "Alert"), (85, "Flooding")]:
-        ax.text(x_max, y, txt, fontsize=7, color=COLOR_TEXT_MUTED, ha="right", va="center",
+        ax.text(duration_minutes, y, txt, fontsize=7, color=COLOR_TEXT_MUTED, ha="right", va="center",
                  style="italic", zorder=1)
 
-    xs = [t["time_min"] for t in timeline_turns]
-    ys = [t["intensity"] for t in timeline_turns]
-
+    xs = [t["plot_x"] for t in turns]
+    ys = [t["intensity"] for t in turns]
     ax.plot(xs, ys, color=COLOR_SECONDARY, linewidth=1.8, zorder=2, alpha=0.85)
 
-    for t in timeline_turns:
+    for t in turns:
         is_crisis = bool(t["crisis_hits"])
         role_color = COLOR_ACCENT if t["role"] == "patient" else "#8a94a6"
         marker = "X" if is_crisis else "o"
         size = 130 if is_crisis else 46
         face = COLOR_DANGER if is_crisis else role_color
-        ax.scatter([t["time_min"]], [t["intensity"]], s=size, marker=marker, color=face,
+        ax.scatter([t["plot_x"]], [t["intensity"]], s=size, marker=marker, color=face,
                    edgecolors="white", linewidths=1.0, zorder=4 if is_crisis else 3)
 
-    # Call out the single highest-intensity crisis-keyword turn, if any —
-    # mirrors how a clinician would want the peak moment labeled directly.
-    crisis_turns = [t for t in timeline_turns if t["crisis_hits"]]
-    if crisis_turns:
-        peak = max(crisis_turns, key=lambda t: t["intensity"])
-        ax.axvline(peak["time_min"], color=COLOR_DANGER, linewidth=1.0, linestyle="--", alpha=0.6, zorder=1)
-        minute, second = int(peak["time_min"]), int(round((peak["time_min"] % 1) * 60))
-        ax.annotate(f"{minute:02d}:{second:02d}", xy=(peak["time_min"], peak["intensity"]),
+    # --- Clinical annotations, grounded in the transcript evidence that
+    # actually drives these values (not a separate guess): crisis keywords
+    # (the exact matched terms), abrupt sentiment/intensity shifts between
+    # consecutive turns, and extended silences (large real time-gaps).
+    crisis_turns = [t for t in turns if t["crisis_hits"]]
+    labeled_crisis = sorted(crisis_turns, key=lambda t: -t["intensity"])[:3]  # cap text labels to avoid overlap
+    for t in crisis_turns:
+        ax.axvline(t["plot_x"], color=COLOR_DANGER, linewidth=1.0, linestyle="--", alpha=0.55, zorder=1)
+    for t in labeled_crisis:
+        minute, second = divmod(int(round(t["time_min"] * 60)), 60)
+        terms = ", ".join(t["crisis_hits"][:2])
+        ax.annotate(f"{minute:02d}:{second:02d} · {terms}", xy=(t["plot_x"], t["intensity"]),
                     xytext=(0, 10), textcoords="offset points", ha="center",
-                    fontsize=7.5, fontweight="bold", color=COLOR_DANGER_TEXT)
+                    fontsize=7, fontweight="bold", color=COLOR_DANGER_TEXT)
 
-    # Legend proxies (role + crisis marker) — built manually since the real
-    # scatter calls are per-point, not per-series.
-    import matplotlib.lines as mlines
+    shift_threshold = 30
+    for i in range(1, len(turns)):
+        if turns[i]["crisis_hits"]:
+            continue  # already annotated as a crisis turn — avoid double-labeling
+        delta = turns[i]["intensity"] - turns[i - 1]["intensity"]
+        if abs(delta) >= shift_threshold:
+            marker = "^" if delta > 0 else "v"
+            ax.scatter([turns[i]["plot_x"]], [turns[i]["intensity"]], marker=marker, s=70,
+                       color=COLOR_WARNING, edgecolors="white", linewidths=0.8, zorder=3)
+            if abs(delta) >= 45:
+                direction = "Escalation" if delta > 0 else "De-escalation"
+                ax.annotate(direction, xy=(turns[i]["plot_x"], turns[i]["intensity"]),
+                            xytext=(0, -13), textcoords="offset points", ha="center",
+                            fontsize=6.5, color=COLOR_WARNING_TEXT, fontweight="bold")
+
+    raw_times = [t["time_min"] for t in turns]
+    gaps = [raw_times[i + 1] - raw_times[i] for i in range(len(raw_times) - 1)]
+    median_gap = _median(gaps)
+    for i, gap in enumerate(gaps):
+        if gap >= 1.0 and (median_gap == 0 or gap >= 2.5 * median_gap):
+            x0, x1 = turns[i]["plot_x"], turns[i + 1]["plot_x"]
+            ax.axvspan(x0, x1, color=COLOR_TEXT_MUTED, alpha=0.06, zorder=0)
+            ax.text((x0 + x1) / 2, 4, f"Pause ~{gap:.0f}m", ha="center", va="bottom",
+                    fontsize=6.5, color=COLOR_TEXT_MUTED, style="italic")
+
+    if raw_span > 0 and duration_minutes > raw_span * 1.15:
+        ax.text(0.0, 1.06, f"Turns scaled proportionally to fill the {duration_minutes:.0f}-minute session axis",
+                transform=ax.transAxes, fontsize=7, color=COLOR_TEXT_MUTED, style="italic")
+
     legend_handles = [
         mlines.Line2D([], [], color=COLOR_ACCENT, marker="o", linestyle="None", markersize=6, label="Patient turn"),
         mlines.Line2D([], [], color="#8a94a6", marker="o", linestyle="None", markersize=6, label="Therapist turn"),
@@ -429,7 +609,7 @@ def build_intrasession_timeline_figure(timeline_turns, duration_minutes, crisis_
             mlines.Line2D([], [], color=COLOR_DANGER, marker="X", linestyle="None", markersize=8, label="Crisis keyword")
         )
 
-    ax.set_xlim(-0.5, x_max)
+    ax.set_xlim(-0.5, duration_minutes + 0.5)
     ax.set_ylim(-4, 108)
     ax.set_xlabel("Session Time (minutes)", fontsize=9, color=COLOR_TEXT_SECONDARY, labelpad=8)
     ax.set_ylabel("Estimated Intensity", fontsize=9, color=COLOR_TEXT_SECONDARY, labelpad=8)

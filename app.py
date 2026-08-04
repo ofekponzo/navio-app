@@ -16,23 +16,21 @@ Architecture (see prior design discussion in the project):
     inspecting the compiled frontend bundle) that aren't reliably targetable
     from custom CSS, so restyling Tabs into a true left sidebar isn't robust.
     A hand-built sidebar uses only components/classes this file controls.
+  - Every place a matplotlib figure or rich HTML card needs styling, the
+    styling is bound via elem_classes/elem_id pointing at custom CSS in
+    CUSTOM_CSS — never via raw HTML with embedded click handlers. Gradio
+    cannot attach a Python callback to an arbitrary HTML element, so any
+    control the clinician needs to click is a real Gradio component
+    (gr.Button, gr.Dataframe with .select(), etc.); HTML is used only where
+    the content is purely visual (cards, badges, the calendar day-strip).
   - There is no separate hidden "workspace" page — the Sessions page IS the
-    analysis workspace (metrics, both clinical graphs, justification, CPT
-    badge, strategy), reached either directly or pre-filled via "Start
-    Session" (a Dashboard appointment card) / "Add New Session" (Patients
-    profile).
-  - The Sessions workspace shows TWO distinct graphs, not one:
-      Graph 1 — Cross-Session Progress & Trajectory: Risk_Score across this
-        patient's recorded sessions, X = Session Number (recsys.df has no
-        real per-session date column — see Part 1 schema notes).
-      Graph 2 — Intra-Session Clinical Timeline: within the CURRENT session,
-        X = minutes from 0 to session duration. Built by parsing the
-        transcript's [MM:SS] markers (recsys.parse_intrasession_timeline)
-        and plotting per-turn intensity, speaker-role shifts, and
-        crisis-keyword-triggered turns (ui_helpers.build_intrasession_
-        timeline_figure). This is presentation-only — it never feeds back
-        into Risk_Score/Risk_Level/Crisis_Flag, which remain entirely the
-        trained models' output.
+    analysis workspace (metrics/rings, both clinical graphs, justification,
+    CPT badge, strategy), reached either directly or pre-filled via "Open"
+    (a Dashboard appointment) / "Add New Session" (Patients profile). The
+    exact same rendering also appears, read-only, inside the Patients page
+    when a clinician clicks a past session — see render_session_dashboard()
+    — so historical review never opens a popup/modal, only this page's own
+    inline "Session Detail" section.
   - A single gr.State() dict carries all session-scoped data (logged-in
     doctor, doctor-scoped patient list, current sidebar view, and a
     session_log of newly-analyzed sessions/newly-registered patients).
@@ -121,6 +119,14 @@ def known_patient_choices(state):
     return sorted(set(state["assigned_patient_ids"]) | set(state["new_patients"]))
 
 
+def _get_field(record, *keys, default=None):
+    for key in keys:
+        val = record.get(key)
+        if val:
+            return val
+    return default
+
+
 # ==============================================================================
 # Sidebar navigation (hand-built — see module docstring for why)
 # ==============================================================================
@@ -145,14 +151,14 @@ def switch_view(view_name, state):
 
 
 def _schedule_slot_updates(schedule):
-    """Returns 2 updates per fixed card slot (row visibility, card HTML) plus
-    one for the 'no appointments' empty state — 2*MAX_SCHEDULE_SLOTS + 1
-    total, in the exact order the layout below wires them up."""
+    """Returns 2 updates per fixed agenda-row slot (row visibility, card
+    HTML) plus one for the 'no appointments' empty state — 2*MAX_SCHEDULE_
+    SLOTS + 1 total, in the exact order the layout below wires them up."""
     updates = []
     for i in range(MAX_SCHEDULE_SLOTS):
         if i < len(schedule):
             updates.append(gr.update(visible=True))
-            updates.append(gr.update(value=ui_helpers.format_schedule_card_html(schedule[i])))
+            updates.append(gr.update(value=ui_helpers.format_agenda_row_html(schedule[i])))
         else:
             updates.append(gr.update(visible=False))
             updates.append(gr.update(value=""))
@@ -175,7 +181,7 @@ def handle_login(name, id_number, state):
             gr.update(visible=False),  # main_group
             state,
             gr.update(value="**Login failed** — check the doctor name and ID number and try again.", visible=True),
-            gr.update(), gr.update(),  # doctor_footer, roster_df (unchanged)
+            gr.update(), gr.update(), gr.update(),  # doctor_footer, roster_df, calendar_strip (unchanged)
             *_empty_schedule_updates(),
         )
 
@@ -196,6 +202,7 @@ def handle_login(name, id_number, state):
         gr.update(value="", visible=False),  # login_error
         gr.update(value=doctor_footer_html),
         roster_df,
+        gr.update(value=ui_helpers.build_calendar_strip_html(state["today_schedule"])),
         *_schedule_slot_updates(state["today_schedule"]),
     )
 
@@ -213,7 +220,9 @@ def start_session_from_slot(slot_index, state):
 
 
 # ==============================================================================
-# Patients page (master-detail)
+# Patients page (master-detail, with a full inline "Session Detail" dashboard
+# — no popups: clicking a past session renders the same rich view Sessions
+# uses, right on this page, via render_session_dashboard()).
 # ==============================================================================
 def filter_roster(search_text, state):
     choices = known_patient_choices(state)
@@ -222,13 +231,21 @@ def filter_roster(search_text, state):
     return pd.DataFrame({"Patient_ID": choices})
 
 
+def _reset_detail_view():
+    """Collapses the inline Session Detail block back to its empty state —
+    used whenever the selected patient changes, since a session detail from
+    the PREVIOUS patient should never linger on screen."""
+    return gr.update(visible=True), gr.update(visible=False)
+
+
 def render_patient_profile(patient_id, state):
     if not patient_id:
+        empty_msg, detail_group = _reset_detail_view()
         return (
             gr.update(value="Search or select a patient from the roster on the left."),
             pd.DataFrame(columns=["Session #", "Diagnosis", "Risk Score", "Risk Level", "Dynamic", "Progress", "CPT Code", "Crisis"]),
             ui_helpers.build_risk_trajectory_figure([], None),
-            gr.update(value="", visible=False),
+            empty_msg, detail_group,
             state,
         )
 
@@ -242,7 +259,8 @@ def render_patient_profile(patient_id, state):
 
     history_df = ui_helpers.format_patient_history_df(history)
     trajectory_fig = ui_helpers.build_risk_trajectory_figure(history, None)
-    return gr.update(value=header), history_df, trajectory_fig, gr.update(value="", visible=False), state
+    empty_msg, detail_group = _reset_detail_view()
+    return gr.update(value=header), history_df, trajectory_fig, empty_msg, detail_group, state
 
 
 def on_roster_select(evt: gr.SelectData, state):
@@ -252,28 +270,57 @@ def on_roster_select(evt: gr.SelectData, state):
     return render_patient_profile(patient_id, state)
 
 
+def render_session_dashboard(record):
+    """Builds the full read-only 'Session Detail' dashboard for ONE
+    historical record: metric/ring cards, Graph 1 (with that session
+    highlighted), Graph 2 (parsed from the stored transcript, if any), CPT
+    badge, justification, and strategy — the same visual language as the
+    live Sessions workspace, reused here instead of a popup/modal."""
+    history = record.get("_patient_history", [])
+    cards_html = ui_helpers.format_metric_cards_html(record)
+    graph1 = ui_helpers.build_risk_trajectory_figure(history, None, highlight_session_number=record.get("Session_Number"))
+
+    duration = _get_field(record, "Session_Duration_minutes", "Session_Duration", default=45)
+    transcript = record.get("Transcript") or ""
+    timeline_turns = recsys.parse_intrasession_timeline(transcript)
+    graph2 = ui_helpers.build_intrasession_timeline_figure(timeline_turns, duration, bool(record.get("Crisis_Flag")))
+
+    cpt_badge_html = ui_helpers.format_cpt_badge_html(record.get("Target_CPT_Code", "—"), bool(record.get("Crisis_Flag")))
+    justification = record.get("Medical_Necessity_Justification") or "No stored justification for this historical session."
+    strategy_html = ui_helpers.format_strategy_html(record.get("Next_Session_Strategy") or "No stored strategy for this historical session.")
+
+    return cards_html, graph1, graph2, justification, cpt_badge_html, strategy_html
+
+
 def on_profile_history_select(evt: gr.SelectData, state):
     records = state.get("current_profile_history", [])
     row_index = evt.index[0]
-    if row_index < len(records):
-        return gr.update(value=ui_helpers.format_session_detail_html(records[row_index]), visible=True)
-    return gr.update(value="", visible=False)
+    if row_index >= len(records):
+        return (gr.update(visible=True), gr.update(visible=False), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
+
+    record = {**records[row_index], "_patient_history": records}
+    cards_html, graph1, graph2, justification, cpt_badge_html, strategy_html = render_session_dashboard(record)
+    return (
+        gr.update(visible=False),  # empty-state message
+        gr.update(visible=True),   # detail group
+        cards_html, graph1, graph2, justification, cpt_badge_html, strategy_html,
+    )
 
 
 def register_new_patient(new_patient_id, state):
     new_patient_id = (new_patient_id or "").strip()
     if not new_patient_id:
         error = gr.update(value="Enter a Patient ID before registering.", visible=True)
-        return gr.update(), state, error, gr.update(), gr.update(), gr.update(), gr.update()
+        return gr.update(), state, error, gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
     if new_patient_id in ALL_PATIENT_IDS or new_patient_id in state["new_patients"]:
         error = gr.update(value=f"Patient ID '{new_patient_id}' already exists.", visible=True)
-        return gr.update(), state, error, gr.update(), gr.update(), gr.update(), gr.update()
+        return gr.update(), state, error, gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
 
     state = {**state, "new_patients": state["new_patients"] + [new_patient_id]}
     roster_df = pd.DataFrame({"Patient_ID": known_patient_choices(state)})
-    header, history_df, fig, detail, state = render_patient_profile(new_patient_id, state)
+    header, history_df, fig, empty_msg, detail_group, state = render_patient_profile(new_patient_id, state)
     no_error = gr.update(value="", visible=False)
-    return roster_df, state, no_error, header, history_df, fig, detail
+    return roster_df, state, no_error, header, history_df, fig, empty_msg, detail_group
 
 
 def add_session_from_profile(state):
@@ -321,7 +368,8 @@ def _run_pipeline(transcript, patient_id, duration_minutes, diagnosis_choice):
     trajectory_fig = ui_helpers.build_risk_trajectory_figure(history_for_plot, session_result)
 
     # Graph 2 — intra-session timeline, parsed live from THIS transcript's
-    # [MM:SS] markers. Presentation-only; does not feed the trained models.
+    # [MM:SS] markers, rescaled across the full session duration. Presentation
+    # -only; does not feed the trained models.
     timeline_turns = recsys.parse_intrasession_timeline(transcript)
     intrasession_fig = ui_helpers.build_intrasession_timeline_figure(
         timeline_turns, session_result["Session_Duration_minutes"], session_result["Crisis_Flag"],
@@ -333,16 +381,19 @@ def _run_pipeline(transcript, patient_id, duration_minutes, diagnosis_choice):
     return (
         status_note, cards_html, trajectory_fig, intrasession_fig,
         generation_result["Medical_Necessity_Justification"], cpt_badge_html, strategy_html,
-        session_result, patient_id, is_known,
+        session_result, patient_id, is_known, transcript, generation_result["Next_Session_Strategy"],
     )
 
 
 def run_session_analysis(transcript, patient_id, duration_minutes, diagnosis_choice, state):
     """Used by the 'Analyze Session' button — persists the result into this
-    browser session's in-memory log so it shows up in Patients/Dashboard."""
+    browser session's in-memory log (including the transcript itself and the
+    generated strategy text) so that later reopening this session from the
+    Patients page's inline Session Detail can render its full dashboard,
+    Graph 2 included, with no popup."""
     (status_note, cards_html, trajectory_fig, intrasession_fig, justification,
-     cpt_badge_html, strategy_html, session_result, patient_id, is_known) = \
-        _run_pipeline(transcript, patient_id, duration_minutes, diagnosis_choice)
+     cpt_badge_html, strategy_html, session_result, patient_id, is_known,
+     transcript_text, strategy_text) = _run_pipeline(transcript, patient_id, duration_minutes, diagnosis_choice)
 
     new_state = {
         **state,
@@ -361,7 +412,11 @@ def run_session_analysis(transcript, patient_id, duration_minutes, diagnosis_cho
         "Progress": session_result["Progress"],
         "Target_CPT_Code": session_result["Target_CPT_Code"],
         "Crisis_Flag": session_result["Crisis_Flag"],
+        "Crisis_Probability": session_result["Crisis_Probability"],
         "Medical_Necessity_Justification": justification,
+        "Next_Session_Strategy": strategy_text,
+        "Transcript": transcript_text,
+        "Session_Duration_minutes": session_result["Session_Duration_minutes"],
     }
     new_state["session_log"][patient_id] = new_state["session_log"].get(patient_id, []) + [logged_record]
 
@@ -372,7 +427,7 @@ def quick_start_analyze(patient_id, transcript, duration_minutes, diagnosis_choi
     """Used by the Quick Starters — runs the real pipeline live so evaluators
     see it actually work, but doesn't touch session state (a demo run isn't
     meant to permanently add to a clinician's caseload)."""
-    status_note, cards_html, trajectory_fig, intrasession_fig, justification, cpt_badge_html, strategy_html, _, _, _ = \
+    status_note, cards_html, trajectory_fig, intrasession_fig, justification, cpt_badge_html, strategy_html, *_ = \
         _run_pipeline(transcript, patient_id, duration_minutes, diagnosis_choice)
     return status_note, cards_html, trajectory_fig, intrasession_fig, justification, cpt_badge_html, strategy_html
 
@@ -418,6 +473,9 @@ def build_quick_starters():
 # Design system CSS — palette/type matched to the reference enterprise-EMR
 # mockup (dark navy sidebar, teal primary accent, blue secondary accent,
 # Hanken Grotesk body / IBM Plex Mono for uppercase labels and data figures).
+# All rules below target either plain HTML tags (stable across Gradio
+# versions) or elem_id/elem_classes THIS FILE assigns — never guessed-at
+# Gradio-internal class names (see the Tabs note in the module docstring).
 # ==============================================================================
 CUSTOM_CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@500;600;700&display=swap');
@@ -444,6 +502,10 @@ CUSTOM_CSS = """
     font-family: var(--font-body) !important;
 }
 .gradio-container * { font-family: var(--font-body); }
+
+/* ---- Clean separation between sidebar and main content ---- */
+.navio-app-row { gap: 24px !important; align-items: flex-start !important; }
+#navio_main_content { padding: 4px 2px 40px !important; }
 
 /* ---- Hand-built sidebar ---- */
 #navio_sidebar {
@@ -507,8 +569,10 @@ CUSTOM_CSS = """
     box-shadow: 0 6px 20px rgba(16,34,59,0.05) !important;
 }
 
-/* ---- Dashboard appointment card action button ---- */
-.navio-card-action-btn button {
+/* ---- Calendar day-strip + agenda list ---- */
+.navio-calendar-scroll { max-height: 420px; overflow-y: auto; }
+.navio-agenda-row { align-items: center !important; }
+.navio-agenda-open-btn button {
     background: var(--navio-accent) !important;
     border: none !important;
     color: #fff !important;
@@ -516,8 +580,7 @@ CUSTOM_CSS = """
     border-radius: 9px !important;
     font-size: 13px !important;
 }
-.navio-card-action-btn button:hover { background: var(--navio-accent-hover) !important; }
-.navio-schedule-row { align-items: center !important; }
+.navio-agenda-open-btn button:hover { background: var(--navio-accent-hover) !important; }
 
 /* ---- Primary action buttons throughout ---- */
 button.primary, .gradio-container button[class*="primary"] {
@@ -564,7 +627,7 @@ with gr.Blocks(title="NavIO") as demo:
 
     # --- Main app ---------------------------------------------------------
     with gr.Group(visible=False) as main_group:
-        with gr.Row():
+        with gr.Row(elem_classes=["navio-app-row"]):
 
             # ---------------- Sidebar ----------------
             with gr.Column(elem_id="navio_sidebar", scale=0, min_width=220):
@@ -585,13 +648,17 @@ with gr.Blocks(title="NavIO") as demo:
                         'sessions, not future bookings — this schedule is a demo simulation for '
                         'illustration, distinct from the real session archive in each patient\'s profile.</div>'
                     )
+                    gr.HTML('<div class="navio-section-label">Day Overview</div>')
+                    with gr.Group(elem_classes=["navio-card", "navio-calendar-scroll"]):
+                        calendar_strip = gr.HTML(value=ui_helpers.build_calendar_strip_html([]))
+                    gr.HTML('<div class="navio-section-label">Today\'s Appointments</div>')
                     schedule_slots = []
                     for _ in range(MAX_SCHEDULE_SLOTS):
-                        with gr.Row(visible=False, elem_classes=["navio-schedule-row"]) as slot_row:
+                        with gr.Row(visible=False, elem_classes=["navio-agenda-row"]) as slot_row:
                             with gr.Column(scale=5):
                                 slot_html = gr.HTML()
-                            with gr.Column(scale=1, min_width=120):
-                                slot_button = gr.Button("Start Session", elem_classes=["navio-card-action-btn"])
+                            with gr.Column(scale=1, min_width=110):
+                                slot_button = gr.Button("Open →", elem_classes=["navio-agenda-open-btn"])
                         schedule_slots.append((slot_row, slot_html, slot_button))
                     no_schedule_msg = gr.HTML(value=ui_helpers.no_schedule_html(), visible=False)
 
@@ -612,9 +679,30 @@ with gr.Blocks(title="NavIO") as demo:
                                 headers=["Session #", "Diagnosis", "Risk Score", "Risk Level", "Dynamic", "Progress", "CPT Code", "Crisis"],
                                 interactive=False,
                             )
-                            profile_session_detail = gr.HTML(value="", visible=False)
                             profile_trajectory_plot = gr.Plot(label="Graph 1 — Cross-Session Progress & Trajectory")
                             add_session_profile_btn = gr.Button("Add New Session", variant="primary")
+
+                    # ---- Session Detail — the FULL dashboard for a clicked
+                    # past session, inline on this page. No popup/modal:
+                    # clicking a row in profile_history_df above swaps the
+                    # empty-state message for this block in place. ----
+                    gr.HTML('<div class="navio-section-label">Session Detail</div>')
+                    profile_detail_empty = gr.HTML(value=ui_helpers.no_session_selected_html())
+                    with gr.Group(visible=False) as profile_detail_group:
+                        with gr.Group(elem_classes=["navio-card"]):
+                            profile_detail_cards = gr.HTML()
+                        with gr.Row():
+                            with gr.Column(scale=1, elem_classes=["navio-card"]):
+                                profile_detail_graph1 = gr.Plot(label="Graph 1 — Cross-Session Progress & Trajectory")
+                            with gr.Column(scale=1, elem_classes=["navio-card"]):
+                                profile_detail_graph2 = gr.Plot(label="Graph 2 — Intra-Session Clinical Timeline")
+                        gr.HTML('<div class="navio-section-label">Document &amp; Billing</div>')
+                        with gr.Row():
+                            with gr.Column(scale=2, elem_classes=["navio-card"]):
+                                profile_detail_justification = gr.Textbox(label="Medical Necessity Justification", lines=6, interactive=False)
+                            with gr.Column(scale=1, elem_classes=["navio-card"]):
+                                profile_detail_cpt_badge = gr.HTML()
+                        profile_detail_strategy = gr.HTML()
 
                 # ---- Sessions page (the analysis workspace) ----
                 with gr.Group(visible=False) as sessions_page:
@@ -693,7 +781,7 @@ with gr.Blocks(title="NavIO") as demo:
     login_button.click(
         fn=handle_login,
         inputs=[login_name, login_id, app_state],
-        outputs=[login_group, main_group, app_state, login_error, doctor_footer, roster_df, *schedule_slot_outputs],
+        outputs=[login_group, main_group, app_state, login_error, doctor_footer, roster_df, calendar_strip, *schedule_slot_outputs],
     )
 
     view_switch_outputs = [dashboard_page, patients_page, sessions_page, nav_dashboard_btn, nav_patients_btn, nav_sessions_btn, app_state]
@@ -709,12 +797,22 @@ with gr.Blocks(title="NavIO") as demo:
         )
 
     search_box.change(fn=filter_roster, inputs=[search_box, app_state], outputs=[roster_df])
-    roster_df.select(fn=on_roster_select, inputs=[app_state], outputs=[profile_header, profile_history_df, profile_trajectory_plot, profile_session_detail, app_state])
-    profile_history_df.select(fn=on_profile_history_select, inputs=[app_state], outputs=[profile_session_detail])
+    roster_df.select(
+        fn=on_roster_select,
+        inputs=[app_state],
+        outputs=[profile_header, profile_history_df, profile_trajectory_plot, profile_detail_empty, profile_detail_group, app_state],
+    )
+    profile_history_df.select(
+        fn=on_profile_history_select,
+        inputs=[app_state],
+        outputs=[profile_detail_empty, profile_detail_group, profile_detail_cards, profile_detail_graph1,
+                 profile_detail_graph2, profile_detail_justification, profile_detail_cpt_badge, profile_detail_strategy],
+    )
     register_button.click(
         fn=register_new_patient,
         inputs=[new_patient_id_box, app_state],
-        outputs=[roster_df, app_state, register_error, profile_header, profile_history_df, profile_trajectory_plot, profile_session_detail],
+        outputs=[roster_df, app_state, register_error, profile_header, profile_history_df, profile_trajectory_plot,
+                 profile_detail_empty, profile_detail_group],
     )
     add_session_profile_btn.click(
         fn=add_session_from_profile,
