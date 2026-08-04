@@ -382,6 +382,8 @@ def _run_pipeline(transcript, patient_id, duration_minutes, diagnosis_choice):
         generation_result = generation.generate_clinical_outputs(session_result, transcript)
     except generation.QuotaExceededError:
         raise gr.Error("The generation model's usage quota was exceeded. Please try again later.")
+    except generation.GenerationRefusedError as e:
+        raise gr.Error(str(e))
     except Exception as e:
         raise gr.Error(f"Generation failed: {e}")
 

@@ -120,6 +120,54 @@ FEATURE_NAMES = [
 ]
 
 
+# --- Explicit self-harm safety-net override (independent of crisis_classifier) --
+# Bug found via live test case (P0002, session 11): a transcript containing
+# "I've been thinking about hurting myself and I have a plan" scored a
+# crisis_probability below CRISIS_THRESHOLD and shipped as Crisis_Flag=False,
+# CPT 90837. Root cause: CRISIS_KEYWORDS above has no substring match for
+# "hurting myself" or "have a plan" — "harm"/"self-harm"/"suicidal"/"suicide"
+# are present, but common EUPHEMISTIC real-world phrasing for active
+# suicidal ideation with a plan isn't covered. CRISIS_KEYWORDS can't simply
+# be edited to add these terms, though: crisis_classifier was trained on
+# features computed from EXACTLY this 56-term lexicon (see the comment
+# above it), so changing it here would silently skew crisis_keyword_count
+# at inference time relative to what the model learned from at training
+# time — a train/serve mismatch that could degrade predictions on every
+# future session, not just fix this one. The correct long-term fix is
+# re-mining the lexicon (same frequency-ratio methodology already used once
+# before, in navio_part3_expanded_lexicon_retrain.py) and RE-TRAINING
+# crisis_classifier in Colab, then re-exporting artifacts.
+#
+# Until that retraining happens, this is a deliberately separate, high-
+# recall, rule-based safety net that runs ALONGSIDE (never instead of) the
+# trained classifier: it fires only when the transcript contains BOTH an
+# explicit first-person self-harm/suicide statement AND an explicit
+# plan/intent marker in the same transcript — the classic "ideation + plan"
+# escalation pattern clinicians are trained to treat as high-acuity (per
+# e.g. Columbia Protocol / C-SSRS logic). A missed crisis is a far worse
+# failure mode than an extra clinician double-check, so this is tuned for
+# recall over precision by design.
+SELF_HARM_INDICATOR_PATTERN = re.compile(
+    r"\b(kill(?:ing)?\s+myself|end(?:ing)?\s+(?:my\s+)?life|hurt(?:ing)?\s+myself|"
+    r"harm(?:ing)?\s+myself|suicid\w*|self[- ]harm|want(?:ed)?\s+to\s+die|"
+    r"don'?t\s+want\s+to\s+(?:be\s+here|live|be\s+alive|wake\s+up))\b",
+    re.IGNORECASE,
+)
+PLAN_OR_INTENT_INDICATOR_PATTERN = re.compile(
+    r"\b(have\s+a\s+plan|a\s+plan\s+to|going\s+to\s+do\s+it|tonight|right\s+now|"
+    r"means\s+to|(?:the\s+)?pills|method)\b",
+    re.IGNORECASE,
+)
+
+
+def detect_explicit_self_harm_risk(transcript):
+    """True when the transcript shows explicit self-harm/suicide language
+    AND an explicit plan/intent marker. See module note above for why this
+    exists as a rule-based override rather than a CRISIS_KEYWORDS edit."""
+    text = transcript if isinstance(transcript, str) else ""
+    return bool(SELF_HARM_INDICATOR_PATTERN.search(text)) and bool(PLAN_OR_INTENT_INDICATOR_PATTERN.search(text))
+
+
 def compute_session_duration_minutes(start_time, end_time):
     start, end = pd.to_datetime(start_time), pd.to_datetime(end_time)
     return max(1, round((end - start).total_seconds() / 60))
@@ -322,6 +370,15 @@ def process_new_session(transcript, start_time, end_time, patient_id):
     crisis_probability = float(crisis_classifier.predict_proba(hybrid_vector)[0, 1])
     crisis_flag = bool(crisis_probability >= CRISIS_THRESHOLD)
 
+    # Rule-based safety-net override — see detect_explicit_self_harm_risk()'s
+    # docstring. Never downgrades a model-flagged crisis; only ever upgrades
+    # a model MISS on explicit ideation+plan language. crisis_probability is
+    # left untouched (it's the model's real, honest output) so the override
+    # is visible/auditable rather than silently absorbed into that number.
+    safety_override_fired = (not crisis_flag) and detect_explicit_self_harm_risk(transcript)
+    if safety_override_fired:
+        crisis_flag = True
+
     risk_level = bucket_risk_level(predicted_score)
     cpt_code, billed_duration = derive_cpt_code(duration_minutes, crisis_flag)
 
@@ -342,6 +399,7 @@ def process_new_session(transcript, start_time, end_time, patient_id):
         "Risk_Level": risk_level,
         "Crisis_Flag": crisis_flag,
         "Crisis_Probability": round(crisis_probability, 3),
+        "Crisis_Safety_Override": safety_override_fired,
         "Predicted_Dynamic": predicted_dyn,
         "Progress": progress,
         "Target_CPT_Code": cpt_code,

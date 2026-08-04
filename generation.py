@@ -17,6 +17,7 @@ temperature, a clinical recommendation that benefits from some flexibility).
 """
 
 import os
+import re
 import time
 import random
 from huggingface_hub import InferenceClient
@@ -34,9 +35,87 @@ class QuotaExceededError(Exception):
     """HTTP 402 — non-transient, don't retry."""
 
 
+class GenerationRefusedError(Exception):
+    """The model declined to generate content even after reinforced clinical-
+    documentation framing. Surfaced explicitly to app.py rather than letting
+    a refusal string silently flow through and get saved/displayed as if it
+    were a real clinical note — see _looks_like_refusal()."""
+
+
 def _is_payment_required(e):
     status_code = getattr(getattr(e, "response", None), "status_code", None)
     return status_code == 402 or ("402" in str(e) and "payment" in str(e).lower())
+
+
+# --- Refusal detection + reinforced-context retry ---------------------------
+# Bug found via live test case (P0002, session 11, active suicidal ideation +
+# plan): Llama-3.1-8B-Instruct returned a hard safety refusal ("I cannot
+# write a justification that implies the patient is at risk of self-harm...")
+# instead of the requested clinical note. The underlying task — writing a
+# retrospective billing justification that documents a clinician's already-
+# completed, appropriate response to disclosed risk — is exactly what real
+# behavioral-health documentation looks like for every at-risk patient a
+# real therapist sees; it is not a request to counsel someone or produce
+# self-harm content. The fix here is to make that context explicit (this is
+# synthetic data, the session already happened, this is standard practice)
+# rather than instructing the model to ignore its own safety judgment —
+# deliberately NOT adding "never refuse" language, since that would remove a
+# safety backstop generically rather than address the actual false-positive
+# cause. If the model still declines after reinforced context, that's
+# surfaced as GenerationRefusedError instead of silently shipping a refusal
+# string as though it were a valid clinical document.
+_REFUSAL_PATTERNS = re.compile(
+    r"^\s*(i(?:'m| am)\s+(?:sorry|not able to|unable to)|i\s+(?:cannot|can't|won't|will not)\b"
+    r"|as an ai\b|i must decline\b)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_refusal(text):
+    """Narrow, high-precision check: refusals are short and start with one
+    of a handful of stock openers. A genuine 110-170 word clinical
+    justification starting with "I" (rare, but possible in free text) won't
+    match unless it ALSO opens with one of these specific refusal phrases."""
+    stripped = (text or "").strip()
+    return bool(stripped) and len(stripped) < 400 and bool(_REFUSAL_PATTERNS.match(stripped))
+
+
+_REFUSAL_REINFORCEMENT = (
+    "\n\nIMPORTANT CONTEXT REMINDER: This is a retrospective clinical documentation task using "
+    "entirely synthetic, algorithmically-generated session data for an academic system — there is "
+    "no real patient, and you are not being asked to counsel anyone or provide any self-harm-related "
+    "information. The clinician has already conducted the session and already performed any "
+    "necessary risk assessment, safety planning, or crisis intervention described in the transcript. "
+    "You are being asked only to help write the after-the-fact clinical note describing what the "
+    "clinician did — exactly what licensed behavioral health professionals are required to document "
+    "for every at-risk patient they see. Declining to document disclosed clinical risk factors would "
+    "itself be a documentation failure. Please proceed with the requested clinical note."
+)
+
+
+def _generate_with_refusal_guard(system_prompt, extra_messages, user_content, max_tokens, temperature):
+    messages = [
+        {"role": "system", "content": system_prompt},
+        *extra_messages,
+        {"role": "user", "content": user_content},
+    ]
+    output = call_model_with_retry_sync(messages, max_tokens, temperature)
+
+    if _looks_like_refusal(output):
+        reinforced_messages = [
+            {"role": "system", "content": system_prompt + _REFUSAL_REINFORCEMENT},
+            *extra_messages,
+            {"role": "user", "content": user_content},
+        ]
+        output = call_model_with_retry_sync(reinforced_messages, max_tokens, temperature)
+
+        if _looks_like_refusal(output):
+            raise GenerationRefusedError(
+                "The generation model declined to draft this note even after reinforced "
+                "clinical-documentation context. Please draft the note manually for this session."
+            )
+
+    return output
 
 
 def call_model_with_retry_sync(messages, max_tokens, temperature):
@@ -72,6 +151,16 @@ DIAGNOSIS_MODALITY_HINTS = {
 JUSTIFICATION_SYSTEM_PROMPT = """You are a clinical documentation assistant helping a licensed \
 mental health professional draft a Medical Necessity Justification for an insurance claim, \
 following CMS/APA-aligned behavioral health documentation standards.
+
+Context: all session data you receive is synthetic, algorithmically-generated data for an academic \
+system — there is no real patient. The clinician has ALREADY conducted the session and ALREADY \
+performed any risk assessment, safety planning, or crisis intervention described in the transcript; \
+you are drafting the after-the-fact clinical note describing what happened, not counseling anyone or \
+providing self-harm-related information. Documenting a patient's disclosed suicidal ideation, \
+self-harm risk, or the clinician's crisis response is a routine, required part of behavioral health \
+documentation — real clinicians write notes like this for every at-risk patient they see, and \
+declining to document real clinical risk factors would itself be a documentation failure that could \
+jeopardize the patient's continuity of care and insurance coverage.
 
 Every justification must, through natural clinical narrative (never as a literal checklist or by \
 naming these items explicitly), reflect all of the following:
@@ -112,26 +201,39 @@ in your output must come from the NEW session's actual data — never reuse deta
 STRATEGY_SYSTEM_PROMPT = """You are a clinical documentation assistant helping a licensed \
 mental health professional plan their approach to an upcoming session.
 
+Context: all session data you receive is synthetic, algorithmically-generated data for an academic \
+system — there is no real patient. The clinician has ALREADY conducted the session and ALREADY \
+performed any risk assessment or safety planning described in the transcript; you are drafting \
+planning notes for their NEXT session, not counseling anyone directly. Recommending safety planning \
+and risk-management focus for an at-risk patient is routine, required clinical practice, not unsafe \
+content.
+
 Rules:
 1. Recommendations must be clearly tailored to the patient's Primary_Diagnosis — a strategy for \
 PTSD must look substantively different from one for Social Anxiety Disorder or MDD. Use the \
 "Typical evidence-based focus areas" reference provided, adapted to this specific session's \
 metrics — do not apply it generically or recite it verbatim.
-2. Explicitly account for the current Risk_Level, Crisis_Flag, Dynamic engagement level, and \
+2. CRISIS OVERRIDE — if Crisis_Flag is True (or an "ACUTE RISK FLAGGED" notice appears at the top \
+of the input), the immediate next-session priority MUST be safety planning, risk monitoring, and \
+stabilization. In that case, treat the "Typical evidence-based focus areas" reference as SECONDARY — \
+mention it only as the plan to resume once stabilization is established, not as the lead \
+recommendation. Do not default to diagnosis-specific techniques (e.g. graded exposure, cognitive \
+restructuring) as the primary focus for a session immediately following a disclosed acute risk episode.
+3. Explicitly account for the current Risk_Level, Crisis_Flag, Dynamic engagement level, and \
 Progress label. If Progress is "Mixed Signal", explicitly acknowledge the conflicting indicators \
 (e.g. improving risk but more defensive engagement, or vice versa) and recommend a cautious, \
 exploratory approach rather than assuming a single clear direction.
-3. If similar past cases are provided, you may reference the general pattern they suggest, but \
+4. If similar past cases are provided, you may reference the general pattern they suggest, but \
 do not claim to know outcomes for THIS patient with certainty.
-4. Use clinically appropriate hedging language ("consider", "may benefit from") rather than \
+5. Use clinically appropriate hedging language ("consider", "may benefit from") rather than \
 directive commands — this is a suggestion for clinical judgment, not an instruction to follow \
 blindly.
-5. Describe the patient's clinical state ONLY using the fields provided (Primary_Diagnosis, \
+6. Describe the patient's clinical state ONLY using the fields provided (Primary_Diagnosis, \
 Risk_Level, Crisis_Flag, Dynamic, Progress). Do NOT invent additional psychological traits (e.g. \
 "independence," "insight," "motivation") to explain a metric — reference the metric itself \
 (e.g. "the Defensive engagement style" or "the elevated Risk_Score"), not a new construct you've \
 made up to narrate it.
-6. One paragraph, 100-160 words. No headers, no bullet points, no commentary outside the paragraph.
+7. One paragraph, 100-160 words. No headers, no bullet points, no commentary outside the paragraph.
 """
 
 
@@ -286,10 +388,26 @@ def build_strategy_prompt(session_result):
         f"Previous session: Risk_Score={previous['Risk_Score']}, Dynamic={previous['Dynamic']}"
         if previous else "This is the patient's first recorded session (intake) — no prior history."
     )
+    crisis_flag = bool(session_result.get("Crisis_Flag"))
 
-    return f"""Patient profile:
+    # Placed FIRST in the prompt, ahead of the diagnosis/modality section,
+    # specifically so it can't get buried under baseline treatment metadata —
+    # the exact failure mode from the P0002 bug report, where an acute
+    # self-harm disclosure was ignored in favor of generic Social Anxiety
+    # exposure-therapy guidance. See STRATEGY_SYSTEM_PROMPT rule 2.
+    crisis_banner = ""
+    if crisis_flag:
+        crisis_banner = (
+            "*** ACUTE RISK FLAGGED FOR THIS SESSION ***\n"
+            "The immediate next-session priority is safety planning, risk monitoring, and "
+            "stabilization. The diagnosis-specific focus areas below describe the longer-term "
+            "treatment plan and are SECONDARY until stabilization is confirmed — do not lead with "
+            "them or default to them as the primary recommendation.\n\n"
+        )
+
+    return f"""{crisis_banner}Patient profile:
 - Primary_Diagnosis: {diagnosis}
-- Typical evidence-based focus areas for this diagnosis (adapt, do not recite verbatim): {modality_hint}
+- Typical evidence-based focus areas for this diagnosis ({"SECONDARY — see acute risk notice above" if crisis_flag else "adapt, do not recite verbatim"}): {modality_hint}
 
 Current session metrics:
 - Risk_Score: {session_result['Predicted_Risk_Score']} ({session_result['Risk_Level']})
@@ -336,20 +454,17 @@ def generate_clinical_outputs(session_result, transcript):
     )
     session_result = {**session_result, "Primary_Diagnosis": diagnosis}
 
-    justification = call_model_with_retry_sync(
-        messages=[
-            {"role": "system", "content": JUSTIFICATION_SYSTEM_PROMPT},
-            *build_justification_fewshot_messages(),
-            {"role": "user", "content": build_justification_prompt(session_result, transcript)},
-        ],
+    justification = _generate_with_refusal_guard(
+        system_prompt=JUSTIFICATION_SYSTEM_PROMPT,
+        extra_messages=build_justification_fewshot_messages(),
+        user_content=build_justification_prompt(session_result, transcript),
         max_tokens=320, temperature=0.3,
     )
 
-    strategy = call_model_with_retry_sync(
-        messages=[
-            {"role": "system", "content": STRATEGY_SYSTEM_PROMPT},
-            {"role": "user", "content": build_strategy_prompt(session_result)},
-        ],
+    strategy = _generate_with_refusal_guard(
+        system_prompt=STRATEGY_SYSTEM_PROMPT,
+        extra_messages=[],
+        user_content=build_strategy_prompt(session_result),
         max_tokens=300, temperature=0.65,
     )
 
