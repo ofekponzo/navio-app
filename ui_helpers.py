@@ -1,7 +1,8 @@
 """
 NavIO — ui_helpers.py
-Presentation-layer helpers for app.py: KPI cards, CPT badges, the patient
-history table, the risk-trajectory plot, and the dataset/session-log merge.
+Presentation-layer helpers for app.py: the design-system palette, KPI cards,
+CPT badges, dashboard appointment cards, the patient history table, the risk
+trajectory plot, and the dataset/session-log merge.
 
 Deliberately kept separate from recsys.py/generation.py — this file has no
 ML logic, only formatting. Note on the dataset schema (confirmed from Part 1):
@@ -10,27 +11,53 @@ with gaps), not sequential 1-5, and there is no real per-session timestamp
 column — history is ordered and displayed by Session_Number, not by date.
 Only a NEW session analyzed live in this app has real Session_Start/
 Session_End values (derived from "now" in recsys.analyze_new_session()).
+
+All UI copy is English-only by project requirement, regardless of the
+language used in conversation with the assistant that built this.
 """
 
 import matplotlib
 matplotlib.use("Agg")  # headless — no display backend on a Space server
 import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
 import pandas as pd
 
-RISK_COLORS = {"Low": "#2e7d32", "Medium": "#e6a700", "High": "#c62828"}
+# ==============================================================================
+# Design-system palette — shared with app.py's CUSTOM_CSS so Python-generated
+# HTML (cards, badges) and pure-CSS-styled Gradio components read as one
+# consistent system rather than two different look-and-feels bolted together.
+# ==============================================================================
+COLOR_BG = "#f4f6fb"
+COLOR_CARD = "#ffffff"
+COLOR_BORDER = "#e6e9f2"
+COLOR_TEXT_PRIMARY = "#1a2233"
+COLOR_TEXT_SECONDARY = "#667085"
+COLOR_TEXT_MUTED = "#98a2b3"
+COLOR_ACCENT = "#0d9488"       # teal — primary actions, positive/synced status
+COLOR_ACCENT_SOFT = "#e6f6f4"
+COLOR_SIDEBAR_BG = "#101828"
+
+RISK_COLORS = {"Low": "#12805c", "Medium": "#b7791f", "High": "#c62828"}
+RISK_SOFT = {"Low": "#e7f6ef", "Medium": "#fdf3e0", "High": "#fbe9e9"}
 CPT_COLORS = {"90832": "#546e7a", "90834": "#1565c0", "90837": "#00695c", "90839": "#c62828"}
+CPT_SOFT = {"90832": "#eceff1", "90834": "#e8f0fb", "90837": "#e3f2ef", "90839": "#fbe9e9"}
+STATUS_COLORS = {"Scheduled": ("#1565c0", "#e8f0fb"), "Completed": ("#12805c", "#e7f6ef")}
 
 
 def risk_level_color(level):
-    return RISK_COLORS.get(level, "#546e7a")
+    return RISK_COLORS.get(level, COLOR_TEXT_SECONDARY)
 
 
-def _card(label, value, accent="#546e7a"):
+# ==============================================================================
+# KPI / metric cards
+# ==============================================================================
+def _card(label, value, accent=COLOR_ACCENT):
     return f"""
-    <div style="flex:1; min-width:140px; background:#fff; border-left:4px solid {accent};
-                border-radius:6px; padding:10px 14px; box-shadow:0 1px 3px rgba(0,0,0,0.08);">
-        <div style="font-size:11px; color:#78909c; text-transform:uppercase; letter-spacing:0.04em;">{label}</div>
-        <div style="font-size:20px; font-weight:600; color:#263238; margin-top:2px;">{value}</div>
+    <div style="flex:1; min-width:150px; background:{COLOR_CARD}; border:1px solid {COLOR_BORDER};
+                border-radius:12px; padding:14px 16px; box-shadow:0 1px 2px rgba(16,24,40,0.04);
+                border-top:3px solid {accent};">
+        <div style="font-size:11px; color:{COLOR_TEXT_MUTED}; text-transform:uppercase; letter-spacing:0.06em; font-weight:600;">{label}</div>
+        <div style="font-size:21px; font-weight:700; color:{COLOR_TEXT_PRIMARY}; margin-top:4px;">{value}</div>
     </div>"""
 
 
@@ -41,7 +68,7 @@ def format_metric_cards_html(session_result):
     start = session_result["Session_Start"].strftime("%H:%M")
     end = session_result["Session_End"].strftime("%H:%M")
     progress = session_result.get("Progress", "—")
-    progress_accent = "#c62828" if "Mixed Signal" in str(progress) else "#546e7a"
+    progress_accent = "#c62828" if "Mixed Signal" in str(progress) else COLOR_ACCENT
 
     cards = [
         _card("Session Start / End", f"{start} – {end}"),
@@ -50,36 +77,72 @@ def format_metric_cards_html(session_result):
         _card("Dynamic", session_result["Predicted_Dynamic"]),
         _card("Progress", progress, progress_accent),
     ]
-    return f'<div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:14px;">{"".join(cards)}</div>'
+    return f'<div style="display:flex; gap:14px; flex-wrap:wrap; margin-bottom:18px;">{"".join(cards)}</div>'
 
 
 def format_cpt_badge_html(cpt_code, crisis_flag):
-    color = CPT_COLORS.get(cpt_code, "#546e7a")
+    color = CPT_COLORS.get(cpt_code, COLOR_TEXT_SECONDARY)
+    soft = CPT_SOFT.get(cpt_code, COLOR_BG)
     label = "CRISIS SESSION" if crisis_flag else "STANDARD SESSION"
     return f"""
-    <div style="background:{color}15; border:2px solid {color}; border-radius:10px;
-                padding:16px; text-align:center;">
-        <div style="font-size:12px; color:{color}; font-weight:600; letter-spacing:0.05em;">{label}</div>
-        <div style="font-size:32px; font-weight:700; color:{color}; margin-top:4px;">{cpt_code}</div>
+    <div style="background:{soft}; border:1px solid {color}33; border-radius:14px;
+                padding:20px; text-align:center; height:100%; box-sizing:border-box;">
+        <div style="font-size:11px; color:{color}; font-weight:700; letter-spacing:0.08em;">{label}</div>
+        <div style="font-size:36px; font-weight:800; color:{color}; margin-top:6px; letter-spacing:-0.02em;">{cpt_code}</div>
+        <div style="font-size:11px; color:{COLOR_TEXT_MUTED}; margin-top:6px;">Recommended CPT code</div>
     </div>"""
 
 
 def format_strategy_html(strategy_text):
     return f"""
-    <div style="background:#eef6f3; border-left:5px solid #00695c; border-radius:6px;
-                padding:16px 18px; line-height:1.55; color:#1b3a34;">
+    <div style="background:{COLOR_ACCENT_SOFT}; border:1px solid {COLOR_ACCENT}33; border-left:4px solid {COLOR_ACCENT};
+                border-radius:10px; padding:18px 20px; line-height:1.6; color:#0f3d38; font-size:14px;">
         {strategy_text}
     </div>"""
 
 
 def no_history_html():
-    return """
-    <div style="text-align:center; padding:28px 12px; color:#78909c;">
-        <div style="font-size:15px; font-weight:600;">No prior history — Intake session</div>
+    return f"""
+    <div style="text-align:center; padding:32px 12px; color:{COLOR_TEXT_MUTED};
+                background:{COLOR_CARD}; border:1px dashed {COLOR_BORDER}; border-radius:12px;">
+        <div style="font-size:15px; font-weight:600; color:{COLOR_TEXT_SECONDARY};">No prior history — Intake session</div>
         <div style="font-size:12px; margin-top:4px;">This patient has no recorded sessions yet.</div>
     </div>"""
 
 
+# ==============================================================================
+# Dashboard appointment cards (replaces a raw gr.Dataframe schedule listing)
+# ==============================================================================
+def format_schedule_card_html(entry):
+    status = entry.get("Status", "Scheduled")
+    status_color, status_soft = STATUS_COLORS.get(status, (COLOR_TEXT_SECONDARY, COLOR_BG))
+    return f"""
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:16px;
+                background:{COLOR_CARD}; border:1px solid {COLOR_BORDER}; border-radius:12px;
+                padding:14px 18px; box-shadow:0 1px 2px rgba(16,24,40,0.04);">
+        <div style="display:flex; align-items:center; gap:16px;">
+            <div style="font-size:14px; font-weight:700; color:{COLOR_TEXT_PRIMARY}; min-width:56px;">{entry.get('Time', '—')}</div>
+            <div>
+                <div style="font-size:14px; font-weight:600; color:{COLOR_TEXT_PRIMARY};">{entry.get('Patient_ID', '—')}</div>
+                <div style="font-size:11px; color:{COLOR_TEXT_MUTED};">Outpatient psychotherapy</div>
+            </div>
+        </div>
+        <div style="background:{status_soft}; color:{status_color}; font-size:11px; font-weight:700;
+                    padding:4px 10px; border-radius:999px; letter-spacing:0.03em;">{status.upper()}</div>
+    </div>"""
+
+
+def no_schedule_html():
+    return f"""
+    <div style="text-align:center; padding:28px 12px; color:{COLOR_TEXT_MUTED};
+                background:{COLOR_CARD}; border:1px dashed {COLOR_BORDER}; border-radius:12px;">
+        No appointments on today's schedule.
+    </div>"""
+
+
+# ==============================================================================
+# Patient history / merge helpers
+# ==============================================================================
 def merge_history(dataset_history, session_log_entries):
     """Combines real dataset history (from recsys.retrieval_index) with any
     sessions logged in-memory during this browser session (gr.State), sorted
@@ -113,23 +176,28 @@ def format_patient_history_df(history_records):
 
 
 def format_session_detail_html(record):
-    """Used when a clinician clicks a row in the history table / sidebar."""
+    """Used when a clinician clicks a row in the history table."""
     justification = record.get("Medical_Necessity_Justification") or "No stored justification text for this session."
     risk_color = risk_level_color(record.get("Risk_Level", ""))
+    crisis_chip = (
+        f"<span style='color:#c62828; font-weight:700;'>CRISIS</span> &nbsp;|&nbsp; "
+        if record.get("Crisis_Flag") else ""
+    )
     return f"""
-    <div style="background:#fff; border:1px solid #e0e0e0; border-radius:8px; padding:14px 16px;">
-        <div style="font-weight:600; font-size:14px; margin-bottom:6px;">
+    <div style="background:{COLOR_CARD}; border:1px solid {COLOR_BORDER}; border-radius:12px; padding:16px 18px;
+                box-shadow:0 1px 2px rgba(16,24,40,0.04);">
+        <div style="font-weight:700; font-size:14px; margin-bottom:8px; color:{COLOR_TEXT_PRIMARY};">
             Session #{record.get('Session_Number', '—')} &middot; {record.get('Primary_Diagnosis', '—')}
         </div>
-        <div style="font-size:13px; color:#455a64; margin-bottom:8px;">
+        <div style="font-size:12.5px; color:{COLOR_TEXT_SECONDARY}; margin-bottom:10px;">
+            {crisis_chip}
             Risk Score: <b style="color:{risk_color}">{record.get('Risk_Score', '—')}</b>
             ({record.get('Risk_Level', '—')}) &nbsp;|&nbsp;
             Dynamic: {record.get('Dynamic', '—')} &nbsp;|&nbsp;
             Progress: {record.get('Progress', '—')} &nbsp;|&nbsp;
             CPT: {record.get('Target_CPT_Code', '—')}
-            {" &nbsp;|&nbsp; <b style='color:#c62828'>CRISIS</b>" if record.get("Crisis_Flag") else ""}
         </div>
-        <div style="font-size:12px; color:#37474f; line-height:1.5; border-top:1px dashed #cfd8dc; padding-top:8px;">
+        <div style="font-size:12.5px; color:{COLOR_TEXT_SECONDARY}; line-height:1.55; border-top:1px dashed {COLOR_BORDER}; padding-top:10px;">
             {justification}
         </div>
     </div>"""
@@ -147,22 +215,36 @@ def format_similar_cases_df(similar_cases):
     return pd.DataFrame(rows)
 
 
+# ==============================================================================
+# Risk trajectory plot — clean clinical styling: transparent background, no
+# default matplotlib chart-junk (heavy borders/ticks), teal accent line.
+# ==============================================================================
+plt.rcParams["font.family"] = "sans-serif"
+plt.rcParams["font.sans-serif"] = ["DejaVu Sans", "Arial", "Helvetica"]
+
+
 def build_risk_trajectory_figure(history_records, new_session_result=None):
     """Historical Risk_Score by Session_Number, with crisis sessions marked
     distinctly and (if provided) the just-analyzed new session appended as a
     visually distinct 'in progress' point rather than a recorded history
-    point."""
-    fig, ax = plt.subplots(figsize=(7.5, 3.2), dpi=110)
+    point. Transparent figure/axes background so it sits cleanly inside a
+    white card container in the UI rather than showing a mismatched white
+    (or default gray) rectangle."""
+    fig, ax = plt.subplots(figsize=(7.6, 3.0), dpi=120)
+    fig.patch.set_alpha(0.0)
+    ax.patch.set_alpha(0.0)
 
     # Risk-level background bands (mirrors bucket_risk_level's thresholds)
-    ax.axhspan(0, 3, color=RISK_COLORS["Low"], alpha=0.06)
-    ax.axhspan(3, 6, color=RISK_COLORS["Medium"], alpha=0.06)
-    ax.axhspan(6, 10, color=RISK_COLORS["High"], alpha=0.06)
+    ax.axhspan(0, 3, color=RISK_COLORS["Low"], alpha=0.05, zorder=0)
+    ax.axhspan(3, 6, color=RISK_COLORS["Medium"], alpha=0.05, zorder=0)
+    ax.axhspan(6, 10, color=RISK_COLORS["High"], alpha=0.05, zorder=0)
 
     if not history_records and new_session_result is None:
         ax.text(0.5, 0.5, "No trajectory yet — this will be the baseline session",
-                 ha="center", va="center", transform=ax.transAxes, color="#78909c", fontsize=10)
+                 ha="center", va="center", transform=ax.transAxes, color=COLOR_TEXT_MUTED, fontsize=10)
         ax.set_xticks([]); ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
         fig.tight_layout()
         return fig
 
@@ -171,25 +253,32 @@ def build_risk_trajectory_figure(history_records, new_session_result=None):
     crisis_hist = [bool(r.get("Crisis_Flag")) for r in history_records]
 
     if x_hist:
-        ax.plot(x_hist, y_hist, color="#37474f", linewidth=1.8, marker="o", markersize=5, zorder=2, label="Recorded sessions")
+        ax.plot(x_hist, y_hist, color=COLOR_ACCENT, linewidth=2.2, marker="o",
+                markersize=5.5, markerfacecolor="white", markeredgecolor=COLOR_ACCENT,
+                markeredgewidth=1.8, zorder=2, label="Recorded sessions")
         for x, y, is_crisis in zip(x_hist, y_hist, crisis_hist):
             if is_crisis:
-                ax.scatter([x], [y], color=RISK_COLORS["High"], s=90, zorder=3, marker="X", label="_nolegend_")
+                ax.scatter([x], [y], color=RISK_COLORS["High"], s=110, zorder=3, marker="X", label="_nolegend_")
 
     if new_session_result is not None:
         new_x = next_session_number(history_records)
         new_y = new_session_result["Predicted_Risk_Score"]
         if x_hist:
-            ax.plot([x_hist[-1], new_x], [y_hist[-1], new_y], color="#8a94a6", linewidth=1.2, linestyle="--", zorder=1)
-        star_color = RISK_COLORS["High"] if new_session_result["Crisis_Flag"] else "#1565c0"
-        ax.scatter([new_x], [new_y], color=star_color, s=180, marker="*", zorder=4, label="Current session")
+            ax.plot([x_hist[-1], new_x], [y_hist[-1], new_y], color=COLOR_TEXT_MUTED,
+                     linewidth=1.4, linestyle="--", zorder=1)
+        star_color = RISK_COLORS["High"] if new_session_result["Crisis_Flag"] else COLOR_ACCENT
+        ax.scatter([new_x], [new_y], color=star_color, s=220, marker="*", zorder=4,
+                   edgecolors="white", linewidths=0.8, label="Current session")
 
-    ax.set_xlabel("Session #", fontsize=9)
-    ax.set_ylabel("Risk Score", fontsize=9)
+    ax.set_xlabel("Session #", fontsize=9, color=COLOR_TEXT_SECONDARY, labelpad=8)
+    ax.set_ylabel("Risk Score", fontsize=9, color=COLOR_TEXT_SECONDARY, labelpad=8)
     ax.set_ylim(-0.3, 10.3)
-    ax.tick_params(labelsize=8)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.legend(loc="upper left", fontsize=7, frameon=False)
+    ax.tick_params(labelsize=8, colors=COLOR_TEXT_SECONDARY, length=0)
+    ax.grid(axis="y", color=COLOR_BORDER, linewidth=0.8, zorder=0)
+    for spine_name, spine in ax.spines.items():
+        spine.set_visible(spine_name == "bottom")
+        if spine_name == "bottom":
+            spine.set_color(COLOR_BORDER)
+    legend = ax.legend(loc="upper left", fontsize=7.5, frameon=False, labelcolor=COLOR_TEXT_SECONDARY)
     fig.tight_layout()
     return fig

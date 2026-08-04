@@ -5,22 +5,29 @@ recsys.py (Part 3) and generation.py (Part 4) pipelines.
 
 Architecture (see prior design discussion in the project):
   - A binary login gate implemented as two sibling gr.Group()s toggled via
-    `visible=True/False` — deliberately NOT gr.Tabs(), since "Login" sitting
+    `visible=True/False` — deliberately NOT a nav item, since "Login" sitting
     as a peer option next to "Dashboard" would be the wrong metaphor for an
     all-or-nothing gate.
-  - Post-login navigation is a native gr.Tabs() (CSS-styled into a vertical
-    strip to read as a sidebar) with three real tabs: Dashboard, Patients,
-    Sessions. There is no separate hidden "workspace" tab — the Sessions tab
-    IS the analysis workspace (metrics, crisis graph, justification, CPT
-    badge, strategy), reached either directly or pre-filled via "Start
-    Session" (Dashboard) / "Add New Session" (Patients profile pane).
+  - Post-login navigation is a HAND-BUILT sidebar: a dark gr.Column of plain
+    gr.Button()s (Dashboard/Patients/Sessions) styled via elem_classes, next
+    to a content gr.Column holding three gr.Group() "pages" toggled via
+    visible=True/False — NOT gr.Tabs(). Gradio 6.x's Tabs component renders
+    with Svelte-scoped, hashed internal CSS classes (verified directly by
+    inspecting the compiled frontend bundle) that aren't reliably targetable
+    from custom CSS, so restyling Tabs into a true left sidebar isn't robust.
+    A hand-built sidebar uses only components/classes this file controls.
+  - There is no separate hidden "workspace" page — the Sessions page IS the
+    analysis workspace (metrics, crisis graph, justification, CPT badge,
+    strategy), reached either directly or pre-filled via "Start Session"
+    (a Dashboard appointment card) / "Add New Session" (Patients profile).
   - A single gr.State() dict carries all session-scoped data (logged-in
-    doctor, doctor-scoped patient list, and a session_log of newly-analyzed
-    sessions / newly-registered patients). This is critical for correctness:
-    Gradio serves one process to every visitor, so anything stored as a
-    plain global Python variable would leak across concurrent users. Nothing
-    written during a session ever mutates recsys.df or retrieval_index — new
-    data only ever lives in this per-session state dict.
+    doctor, doctor-scoped patient list, current sidebar view, and a
+    session_log of newly-analyzed sessions/newly-registered patients).
+    Critical for correctness: Gradio serves one process to every visitor, so
+    anything stored as a plain global Python variable would leak across
+    concurrent users. Nothing written during a session ever mutates
+    recsys.df or retrieval_index — new data only ever lives in this
+    per-session state dict.
   - Models, the dataset, and the retrieval index all load once at import
     time via `import recsys` / `import generation` — never inside a callback.
 
@@ -29,6 +36,8 @@ live only in that session's gr.State and are lost on refresh. This is a
 demo-appropriate choice, not an oversight — persisting back to the HF
 dataset repo on every submission would be a much heavier addition than this
 phase calls for.
+
+All interface copy is English-only by project requirement.
 """
 
 try:
@@ -47,6 +56,7 @@ except ImportError:
 import gradio as gr
 import pandas as pd
 from datetime import datetime
+from functools import partial
 
 import auth
 import recsys
@@ -55,6 +65,7 @@ import ui_helpers
 
 DIAGNOSIS_CHOICES = ["Auto-detect"] + sorted(generation.DIAGNOSIS_MODALITY_HINTS.keys())
 ALL_PATIENT_IDS = recsys.get_all_patient_ids()
+MAX_SCHEDULE_SLOTS = 8
 
 
 if HAS_SPACES:
@@ -83,6 +94,7 @@ def default_state():
         "selected_profile_patient": None,
         "current_profile_history": [],
         "pending_patient_id": None,
+        "current_view": "dashboard",
     }
 
 
@@ -97,6 +109,49 @@ def known_patient_choices(state):
 
 
 # ==============================================================================
+# Sidebar navigation (hand-built — see module docstring for why)
+# ==============================================================================
+NAV_ACTIVE_CLASSES = ["navio-nav-btn", "navio-nav-btn-active"]
+NAV_INACTIVE_CLASSES = ["navio-nav-btn"]
+
+
+def _view_updates(view_name):
+    return (
+        gr.update(visible=view_name == "dashboard"),
+        gr.update(visible=view_name == "patients"),
+        gr.update(visible=view_name == "sessions"),
+        gr.update(elem_classes=NAV_ACTIVE_CLASSES if view_name == "dashboard" else NAV_INACTIVE_CLASSES),
+        gr.update(elem_classes=NAV_ACTIVE_CLASSES if view_name == "patients" else NAV_INACTIVE_CLASSES),
+        gr.update(elem_classes=NAV_ACTIVE_CLASSES if view_name == "sessions" else NAV_INACTIVE_CLASSES),
+    )
+
+
+def switch_view(view_name, state):
+    state = {**state, "current_view": view_name}
+    return (*_view_updates(view_name), state)
+
+
+def _schedule_slot_updates(schedule):
+    """Returns 2 updates per fixed card slot (row visibility, card HTML) plus
+    one for the 'no appointments' empty state — 2*MAX_SCHEDULE_SLOTS + 1
+    total, in the exact order the layout below wires them up."""
+    updates = []
+    for i in range(MAX_SCHEDULE_SLOTS):
+        if i < len(schedule):
+            updates.append(gr.update(visible=True))
+            updates.append(gr.update(value=ui_helpers.format_schedule_card_html(schedule[i])))
+        else:
+            updates.append(gr.update(visible=False))
+            updates.append(gr.update(value=""))
+    updates.append(gr.update(visible=len(schedule) == 0))
+    return updates
+
+
+def _empty_schedule_updates():
+    return [gr.update()] * (2 * MAX_SCHEDULE_SLOTS + 1)
+
+
+# ==============================================================================
 # Login
 # ==============================================================================
 def handle_login(name, id_number, state):
@@ -107,47 +162,45 @@ def handle_login(name, id_number, state):
             gr.update(visible=False),  # main_group
             state,
             gr.update(value="**Login failed** — check the doctor name and ID number and try again.", visible=True),
-            gr.update(), gr.update(), gr.update(),  # doctor_label, schedule_df, roster_df (unchanged)
+            gr.update(), gr.update(),  # doctor_footer, roster_df (unchanged)
+            *_empty_schedule_updates(),
         )
 
     state = {**default_state(), "doctor": doctor}
     state["assigned_patient_ids"] = auth.get_assigned_patient_ids(doctor["doctor_id"], ALL_PATIENT_IDS)
     state["today_schedule"] = auth.generate_mock_schedule(doctor["doctor_id"], state["assigned_patient_ids"])
 
-    schedule_df = pd.DataFrame(state["today_schedule"]) if state["today_schedule"] else pd.DataFrame(columns=["Time", "Patient_ID", "Status"])
     roster_df = pd.DataFrame({"Patient_ID": known_patient_choices(state)})
+    doctor_footer_html = (
+        f"<div><strong>{doctor['name']}</strong></div>"
+        f"<div>{len(state['assigned_patient_ids'])} patients on caseload</div>"
+    )
 
     return (
         gr.update(visible=False),  # login_group
         gr.update(visible=True),   # main_group
         state,
         gr.update(value="", visible=False),  # login_error
-        gr.update(value=f"Logged in as **{doctor['name']}** &middot; {len(state['assigned_patient_ids'])} patients on caseload"),
-        schedule_df,
+        gr.update(value=doctor_footer_html),
         roster_df,
+        *_schedule_slot_updates(state["today_schedule"]),
     )
 
 
 # ==============================================================================
-# Dashboard tab
+# Dashboard page
 # ==============================================================================
-def on_dashboard_select(evt: gr.SelectData, state):
-    row_index = evt.index[0]
-    if row_index < len(state["today_schedule"]):
-        patient_id = state["today_schedule"][row_index]["Patient_ID"]
-        return patient_id, f"Selected: **{patient_id}**"
-    return None, ""
-
-
-def start_session_from_dashboard(selected_patient_id, state):
-    if not selected_patient_id:
-        return gr.update(), state, gr.update(selected="sessions")
-    state = {**state, "pending_patient_id": selected_patient_id}
-    return gr.update(value=selected_patient_id), state, gr.update(selected="sessions")
+def start_session_from_slot(slot_index, state):
+    schedule = state.get("today_schedule", [])
+    if slot_index >= len(schedule):
+        return (gr.update(), *switch_view(state.get("current_view", "dashboard"), state))
+    patient_id = schedule[slot_index]["Patient_ID"]
+    state = {**state, "pending_patient_id": patient_id}
+    return (gr.update(value=patient_id), *switch_view("sessions", state))
 
 
 # ==============================================================================
-# Patients tab (master-detail)
+# Patients page (master-detail)
 # ==============================================================================
 def filter_roster(search_text, state):
     choices = known_patient_choices(state)
@@ -213,13 +266,13 @@ def register_new_patient(new_patient_id, state):
 def add_session_from_profile(state):
     patient_id = state.get("selected_profile_patient")
     if not patient_id:
-        return gr.update(), state, gr.update()
+        return (gr.update(), *switch_view(state.get("current_view", "patients"), state))
     state = {**state, "pending_patient_id": patient_id}
-    return gr.update(value=patient_id), state, gr.update(selected="sessions")
+    return (gr.update(value=patient_id), *switch_view("sessions", state))
 
 
 # ==============================================================================
-# Sessions tab (the analysis workspace — shared by both entry points AND
+# Sessions page (the analysis workspace — shared by both entry points AND
 # direct/standalone use)
 # ==============================================================================
 def _run_pipeline(transcript, patient_id, duration_minutes, diagnosis_choice):
@@ -334,26 +387,104 @@ def build_quick_starters():
 
 
 # ==============================================================================
-# Layout
+# Design system CSS
 # ==============================================================================
 CUSTOM_CSS = """
-.gradio-container {background: #f4f6f8;}
-#nav_tabs > .tab-nav {
-    flex-direction: column;
-    width: 190px;
-    border-right: 1px solid #e0e0e0;
-    border-bottom: none;
-    gap: 4px;
-    padding-top: 8px;
+:root {
+    --navio-bg: #f4f6fb;
+    --navio-card: #ffffff;
+    --navio-border: #e6e9f2;
+    --navio-text: #1a2233;
+    --navio-text-secondary: #667085;
+    --navio-text-muted: #98a2b3;
+    --navio-accent: #0d9488;
+    --navio-accent-soft: #e6f6f4;
+    --navio-sidebar-bg: #101828;
 }
-#nav_tabs > .tab-nav button {
-    text-align: left;
-    justify-content: flex-start;
-    border-radius: 6px;
-    margin: 0 8px;
+
+.gradio-container {
+    background: var(--navio-bg) !important;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+}
+
+/* ---- Hand-built sidebar ---- */
+#navio_sidebar {
+    background: var(--navio-sidebar-bg) !important;
+    border-radius: 16px !important;
+    padding: 20px 14px !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 3px !important;
+    min-height: 70vh;
+}
+.navio-brand-box { color: #fff; font-weight: 800; font-size: 19px; letter-spacing: 0.02em; padding: 6px 10px 24px; }
+.navio-brand-box span { color: var(--navio-accent); }
+
+.navio-nav-btn button {
+    background: transparent !important;
+    color: #aab3c9 !important;
+    border: none !important;
+    box-shadow: none !important;
+    text-align: left !important;
+    justify-content: flex-start !important;
+    border-radius: 8px !important;
+    padding: 11px 14px !important;
+    font-weight: 500 !important;
+    font-size: 14.5px !important;
+}
+.navio-nav-btn button:hover { background: rgba(255,255,255,0.07) !important; color: #fff !important; }
+.navio-nav-btn-active button { background: var(--navio-accent) !important; color: #fff !important; font-weight: 600 !important; }
+
+.navio-sidebar-footer { margin-top: auto !important; padding: 16px 10px 4px !important; border-top: 1px solid rgba(255,255,255,0.1) !important; color: #aab3c9 !important; font-size: 12.5px !important; line-height: 1.6; }
+.navio-sidebar-footer strong { color: #fff; font-size: 13.5px; }
+
+/* ---- Page headers ---- */
+.navio-page-title { font-size: 21px; font-weight: 700; color: var(--navio-text); margin: 4px 0 2px; }
+.navio-page-subtitle { font-size: 13px; color: var(--navio-text-secondary); margin-bottom: 18px; line-height: 1.5; }
+
+/* ---- Generic card wrapper (applied via elem_classes, fully under our control) ---- */
+.navio-card {
+    background: var(--navio-card) !important;
+    border: 1px solid var(--navio-border) !important;
+    border-radius: 12px !important;
+    padding: 18px !important;
+    box-shadow: 0 1px 3px rgba(16,24,40,0.05) !important;
+}
+
+/* ---- Dashboard appointment card action button ---- */
+.navio-card-action-btn button {
+    background: var(--navio-accent) !important;
+    border: none !important;
+    color: #fff !important;
+    font-weight: 600 !important;
+    border-radius: 8px !important;
+    font-size: 13px !important;
+}
+.navio-card-action-btn button:hover { background: #0b7d73 !important; }
+.navio-schedule-row { align-items: center !important; }
+
+/* ---- Primary action buttons throughout ---- */
+button.primary, .gradio-container button[class*="primary"] {
+    background: var(--navio-accent) !important;
+    border: none !important;
+}
+
+/* ---- Tables: plain HTML <table>/<th>/<td> tags are stable across Gradio
+   versions even when component wrapper classes aren't, so this targets the
+   semantic elements directly rather than guessing Gradio's internal classes. ---- */
+.gradio-container table { border-collapse: collapse !important; font-size: 13px !important; }
+.gradio-container table thead th {
+    background: #fafbfd !important; color: var(--navio-text-secondary) !important;
+    font-weight: 600 !important; text-transform: uppercase; font-size: 11px !important; letter-spacing: 0.04em;
+}
+.gradio-container table td, .gradio-container table th {
+    padding: 10px 14px !important; border-bottom: 1px solid var(--navio-border) !important;
 }
 """
 
+# ==============================================================================
+# Layout
+# ==============================================================================
 with gr.Blocks(title="NavIO") as demo:
     app_state = gr.State(value=default_state())
 
@@ -371,109 +502,132 @@ with gr.Blocks(title="NavIO") as demo:
 
     # --- Main app ---------------------------------------------------------
     with gr.Group(visible=False) as main_group:
-        doctor_label = gr.Markdown("")
+        with gr.Row():
 
-        with gr.Tabs(elem_id="nav_tabs") as nav_tabs:
+            # ---------------- Sidebar ----------------
+            with gr.Column(elem_id="navio_sidebar", scale=0, min_width=220):
+                gr.HTML('<div class="navio-brand-box">NAV<span>IO</span></div>')
+                nav_dashboard_btn = gr.Button("Dashboard", elem_classes=NAV_ACTIVE_CLASSES)
+                nav_patients_btn = gr.Button("Patients", elem_classes=NAV_INACTIVE_CLASSES)
+                nav_sessions_btn = gr.Button("Sessions", elem_classes=NAV_INACTIVE_CLASSES)
+                doctor_footer = gr.HTML(value="", elem_classes=["navio-sidebar-footer"])
 
-            # ---------------- Dashboard ----------------
-            with gr.Tab("Dashboard", id="dashboard"):
-                gr.Markdown("#### Today's Schedule")
-                gr.Markdown(
-                    "*NavIO's dataset models historical therapy sessions, not future bookings — "
-                    "this schedule is a demo simulation for illustration, distinct from the real "
-                    "session archive in each patient's profile.*"
-                )
-                schedule_df = gr.Dataframe(headers=["Time", "Patient_ID", "Status"], interactive=False)
-                dashboard_selection_label = gr.Markdown("")
-                dashboard_selected_patient = gr.State(value=None)
-                start_session_dash_btn = gr.Button("Start Session with Selected Patient", variant="primary")
+            # ---------------- Main content ----------------
+            with gr.Column(elem_id="navio_main_content", scale=1):
 
-            # ---------------- Patients ----------------
-            with gr.Tab("Patients", id="patients"):
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        gr.Markdown("#### Patient Directory")
-                        search_box = gr.Textbox(label="Search by Patient ID", placeholder="e.g. P0001")
-                        roster_df = gr.Dataframe(headers=["Patient_ID"], interactive=False)
-                        with gr.Accordion("Register New Patient (Intake)", open=False):
-                            new_patient_id_box = gr.Textbox(label="New Patient ID", placeholder="e.g. P_NEW_001")
-                            register_button = gr.Button("Register")
-                            register_error = gr.Markdown(value="", visible=False)
-                    with gr.Column(scale=2):
-                        profile_header = gr.Markdown("Search or select a patient from the roster on the left.")
-                        profile_history_df = gr.Dataframe(
-                            headers=["Session #", "Diagnosis", "Risk Score", "Risk Level", "Dynamic", "Progress", "CPT Code", "Crisis"],
-                            interactive=False,
-                        )
-                        profile_session_detail = gr.HTML(value="", visible=False)
-                        profile_trajectory_plot = gr.Plot()
-                        add_session_profile_btn = gr.Button("Add New Session", variant="primary")
-
-            # ---------------- Sessions (the analysis workspace) ----------------
-            with gr.Tab("Sessions", id="sessions"):
-                gr.Markdown("#### New Session — Analysis & Documentation")
-                gr.Markdown(
-                    "*Arriving from Dashboard or a Patient Profile pre-fills the Patient ID below "
-                    "(still editable). Visiting this tab directly starts blank — typing an unrecognized "
-                    "Patient ID will auto-register it as a new intake patient on submit.*"
-                )
-                with gr.Row():
-                    session_patient_id = gr.Dropdown(
-                        label="Patient ID", choices=ALL_PATIENT_IDS, allow_custom_value=True,
+                # ---- Dashboard page ----
+                with gr.Group(visible=True) as dashboard_page:
+                    gr.HTML('<div class="navio-page-title">Today\'s Schedule</div>')
+                    gr.HTML(
+                        '<div class="navio-page-subtitle">NavIO\'s dataset models historical therapy '
+                        'sessions, not future bookings — this schedule is a demo simulation for '
+                        'illustration, distinct from the real session archive in each patient\'s profile.</div>'
                     )
-                    session_duration = gr.Number(label="Session Duration (minutes)", value=45, minimum=1)
-                    session_diagnosis = gr.Dropdown(label="Primary Diagnosis (override)", choices=DIAGNOSIS_CHOICES, value="Auto-detect")
-                session_transcript = gr.Textbox(label="Session Transcript", lines=8, placeholder="Paste or type the session transcript here...")
-                analyze_button = gr.Button("Analyze Session", variant="primary")
+                    schedule_slots = []
+                    for _ in range(MAX_SCHEDULE_SLOTS):
+                        with gr.Row(visible=False, elem_classes=["navio-schedule-row"]) as slot_row:
+                            with gr.Column(scale=5):
+                                slot_html = gr.HTML()
+                            with gr.Column(scale=1, min_width=120):
+                                slot_button = gr.Button("Start Session", elem_classes=["navio-card-action-btn"])
+                        schedule_slots.append((slot_row, slot_html, slot_button))
+                    no_schedule_msg = gr.HTML(value=ui_helpers.no_schedule_html(), visible=False)
 
-                # Output components are created with render=False so they can be
-                # referenced by gr.Examples' outputs= below (Gradio needs the actual
-                # object, not a forward reference), while still visually placing the
-                # Quick Starters table above the results via explicit .render() calls.
-                session_status = gr.Markdown("", render=False)
-                session_cards = gr.HTML(render=False)
-                session_trajectory_plot = gr.Plot(label="Risk Trajectory", render=False)
-                justification_box = gr.Textbox(label="Medical Necessity Justification", lines=8, interactive=False, render=False)
-                cpt_badge = gr.HTML(render=False)
-                strategy_output = gr.HTML(label="Next-Session Strategy", render=False)
+                # ---- Patients page ----
+                with gr.Group(visible=False) as patients_page:
+                    gr.HTML('<div class="navio-page-title">Patient Directory</div>')
+                    with gr.Row():
+                        with gr.Column(scale=1, elem_classes=["navio-card"]):
+                            search_box = gr.Textbox(label="Search by Patient ID", placeholder="e.g. P0001")
+                            roster_df = gr.Dataframe(headers=["Patient_ID"], interactive=False)
+                            with gr.Accordion("Register New Patient (Intake)", open=False):
+                                new_patient_id_box = gr.Textbox(label="New Patient ID", placeholder="e.g. P_NEW_001")
+                                register_button = gr.Button("Register")
+                                register_error = gr.Markdown(value="", visible=False)
+                        with gr.Column(scale=2, elem_classes=["navio-card"]):
+                            profile_header = gr.Markdown("Search or select a patient from the roster on the left.")
+                            profile_history_df = gr.Dataframe(
+                                headers=["Session #", "Diagnosis", "Risk Score", "Risk Level", "Dynamic", "Progress", "CPT Code", "Crisis"],
+                                interactive=False,
+                            )
+                            profile_session_detail = gr.HTML(value="", visible=False)
+                            profile_trajectory_plot = gr.Plot()
+                            add_session_profile_btn = gr.Button("Add New Session", variant="primary")
 
-                # fn+outputs here means clicking an example doesn't just pre-fill the
-                # inputs — it runs the live pipeline immediately, satisfying "1-click
-                # and see an example of how the application works."
-                gr.Examples(
-                    examples=build_quick_starters(),
-                    inputs=[session_patient_id, session_transcript, session_duration, session_diagnosis],
-                    outputs=[session_status, session_cards, session_trajectory_plot, justification_box, cpt_badge, strategy_output],
-                    fn=quick_start_analyze,
-                    cache_examples=False,
-                    label="Quick Starters",
-                )
+                # ---- Sessions page (the analysis workspace) ----
+                with gr.Group(visible=False) as sessions_page:
+                    gr.HTML('<div class="navio-page-title">New Session — Analysis &amp; Documentation</div>')
+                    gr.HTML(
+                        '<div class="navio-page-subtitle">Arriving from Dashboard or a Patient Profile '
+                        'pre-fills the Patient ID below (still editable). Visiting this page directly '
+                        'starts blank — typing an unrecognized Patient ID will auto-register it as a '
+                        'new intake patient on submit.</div>'
+                    )
+                    with gr.Row(elem_classes=["navio-card"]):
+                        session_patient_id = gr.Dropdown(
+                            label="Patient ID", choices=ALL_PATIENT_IDS, allow_custom_value=True,
+                        )
+                        session_duration = gr.Number(label="Session Duration (minutes)", value=45, minimum=1)
+                        session_diagnosis = gr.Dropdown(label="Primary Diagnosis (override)", choices=DIAGNOSIS_CHOICES, value="Auto-detect")
+                    session_transcript = gr.Textbox(label="Session Transcript", lines=8, placeholder="Paste or type the session transcript here...")
+                    analyze_button = gr.Button("Analyze Session", variant="primary")
 
-                session_status.render()
-                session_cards.render()
-                session_trajectory_plot.render()
-                with gr.Row():
-                    with gr.Column(scale=2):
-                        justification_box.render()
-                    with gr.Column(scale=1):
-                        cpt_badge.render()
-                strategy_output.render()
+                    # Output components are created with render=False so they can be
+                    # referenced by gr.Examples' outputs= below (Gradio needs the actual
+                    # object, not a forward reference), while still visually placing the
+                    # Quick Starters table above the results via explicit .render() calls.
+                    session_status = gr.Markdown("", render=False)
+                    session_cards = gr.HTML(render=False)
+                    session_trajectory_plot = gr.Plot(label="Risk Trajectory", render=False)
+                    justification_box = gr.Textbox(label="Medical Necessity Justification", lines=8, interactive=False, render=False)
+                    cpt_badge = gr.HTML(render=False)
+                    strategy_output = gr.HTML(label="Next-Session Strategy", render=False)
+
+                    # fn+outputs here means clicking an example doesn't just pre-fill the
+                    # inputs — it runs the live pipeline immediately, satisfying "1-click
+                    # and see an example of how the application works."
+                    gr.Examples(
+                        examples=build_quick_starters(),
+                        inputs=[session_patient_id, session_transcript, session_duration, session_diagnosis],
+                        outputs=[session_status, session_cards, session_trajectory_plot, justification_box, cpt_badge, strategy_output],
+                        fn=quick_start_analyze,
+                        cache_examples=False,
+                        label="Quick Starters",
+                    )
+
+                    session_status.render()
+                    with gr.Group(elem_classes=["navio-card"]):
+                        session_cards.render()
+                        session_trajectory_plot.render()
+                    with gr.Row():
+                        with gr.Column(scale=2, elem_classes=["navio-card"]):
+                            justification_box.render()
+                        with gr.Column(scale=1, elem_classes=["navio-card"]):
+                            cpt_badge.render()
+                    strategy_output.render()
 
     # ==========================================================================
     # Wiring
     # ==========================================================================
+    schedule_slot_outputs = [comp for row, html, btn in schedule_slots for comp in (row, html)] + [no_schedule_msg]
+
     login_button.click(
         fn=handle_login,
         inputs=[login_name, login_id, app_state],
-        outputs=[login_group, main_group, app_state, login_error, doctor_label, schedule_df, roster_df],
+        outputs=[login_group, main_group, app_state, login_error, doctor_footer, roster_df, *schedule_slot_outputs],
     )
 
-    schedule_df.select(fn=on_dashboard_select, inputs=[app_state], outputs=[dashboard_selected_patient, dashboard_selection_label])
-    start_session_dash_btn.click(
-        fn=start_session_from_dashboard,
-        inputs=[dashboard_selected_patient, app_state],
-        outputs=[session_patient_id, app_state, nav_tabs],
-    )
+    view_switch_outputs = [dashboard_page, patients_page, sessions_page, nav_dashboard_btn, nav_patients_btn, nav_sessions_btn, app_state]
+    nav_dashboard_btn.click(fn=partial(switch_view, "dashboard"), inputs=[app_state], outputs=view_switch_outputs)
+    nav_patients_btn.click(fn=partial(switch_view, "patients"), inputs=[app_state], outputs=view_switch_outputs)
+    nav_sessions_btn.click(fn=partial(switch_view, "sessions"), inputs=[app_state], outputs=view_switch_outputs)
+
+    for i, (slot_row, slot_html, slot_button) in enumerate(schedule_slots):
+        slot_button.click(
+            fn=partial(start_session_from_slot, i),
+            inputs=[app_state],
+            outputs=[session_patient_id, *view_switch_outputs],
+        )
 
     search_box.change(fn=filter_roster, inputs=[search_box, app_state], outputs=[roster_df])
     roster_df.select(fn=on_roster_select, inputs=[app_state], outputs=[profile_header, profile_history_df, profile_trajectory_plot, profile_session_detail, app_state])
@@ -486,7 +640,7 @@ with gr.Blocks(title="NavIO") as demo:
     add_session_profile_btn.click(
         fn=add_session_from_profile,
         inputs=[app_state],
-        outputs=[session_patient_id, app_state, nav_tabs],
+        outputs=[session_patient_id, *view_switch_outputs],
     )
 
     analyze_button.click(
