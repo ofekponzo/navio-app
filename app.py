@@ -31,6 +31,19 @@ dataset repo on every submission would be a much heavier addition than this
 phase calls for.
 """
 
+try:
+    # Must be the very first import in the file, before anything that touches
+    # CUDA (torch, sentence-transformers, transformers — all pulled in by
+    # recsys.py below). HF's Docker template bundles this package into every
+    # Gradio Space's environment; if it's imported after CUDA has already been
+    # initialized, its background hot-reload watcher thread crashes with
+    # "CUDA has been initialized before importing the `spaces` package."
+    # Harmless to import even though this app doesn't use @spaces.GPU anywhere
+    # — NavIO's whole pipeline is designed to run on CPU.
+    import spaces  # noqa: F401
+except ImportError:
+    pass  # not present on a plain cpu-basic Space — nothing to do
+
 import gradio as gr
 import pandas as pd
 from datetime import datetime

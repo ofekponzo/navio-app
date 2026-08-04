@@ -3,7 +3,7 @@ datasets
 sentence-transformers
 transformers
 torch
-scikit-learn
+scikit-learn==1.6.1
 huggingface_hub
 joblib
 pandas
