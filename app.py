@@ -38,11 +38,11 @@ try:
     # Gradio Space's environment; if it's imported after CUDA has already been
     # initialized, its background hot-reload watcher thread crashes with
     # "CUDA has been initialized before importing the `spaces` package."
-    # Harmless to import even though this app doesn't use @spaces.GPU anywhere
-    # — NavIO's whole pipeline is designed to run on CPU.
-    import spaces  # noqa: F401
+    import spaces
+    HAS_SPACES = True
 except ImportError:
-    pass  # not present on a plain cpu-basic Space — nothing to do
+    spaces = None
+    HAS_SPACES = False  # plain cpu-basic Space — nothing else to do
 
 import gradio as gr
 import pandas as pd
@@ -55,6 +55,19 @@ import ui_helpers
 
 DIAGNOSIS_CHOICES = ["Auto-detect"] + sorted(generation.DIAGNOSIS_MODALITY_HINTS.keys())
 ALL_PATIENT_IDS = recsys.get_all_patient_ids()
+
+
+if HAS_SPACES:
+    @spaces.GPU
+    def _zerogpu_startup_probe():
+        """NavIO's entire pipeline (mpnet embeddings, DistilBERT sentiment,
+        all sklearn models) runs on CPU by design — nothing here needs a GPU.
+        This function exists purely because HF's ZeroGPU hardware tier
+        requires at least one @spaces.GPU-decorated function to be detected
+        and invoked at startup, or the Space fails with 'No @spaces.GPU
+        function detected during startup.' It is never called anywhere in
+        the real request path."""
+        return True
 
 
 # ==============================================================================
@@ -484,4 +497,6 @@ with gr.Blocks(title="NavIO") as demo:
 
 
 if __name__ == "__main__":
+    if HAS_SPACES:
+        _zerogpu_startup_probe()  # registers the dummy GPU function so ZeroGPU's startup check passes
     demo.launch(css=CUSTOM_CSS)
