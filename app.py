@@ -503,7 +503,10 @@ CUSTOM_CSS = """
 footer { display: none !important; }   /* hide "Built with Gradio" for the SaaS look */
 /* ---- Clean separation between sidebar and main content ---- */
 .navio-app-row { gap: 28px !important; align-items: flex-start !important; }
-#navio_main_content { padding: 8px 6px 48px !important; max-width: 1180px; }
+#navio_main_content { padding: 8px 6px 28px !important; max-width: 1180px; }
+/* Tighten Gradio's vertical stacking gap inside the main content so the
+   Dashboard (Day Overview + appointment rows) fits on one screen. */
+#navio_main_content .gap { gap: 10px !important; }
 /* ---- Hand-built sidebar (LIGHT) ---- */
 #navio_sidebar {
     background: var(--navio-card) !important;
@@ -555,10 +558,10 @@ footer { display: none !important; }   /* hide "Built with Gradio" for the SaaS 
 .navio-sidebar-footer strong { color: var(--navio-text); font-size: 13.5px; }
 /* ---- Page headers ---- */
 .navio-page-title { font-size: 25px; font-weight: 800; color: var(--navio-text); letter-spacing: -0.02em; margin: 4px 0 2px; }
-.navio-page-subtitle { font-size: 14px; color: var(--navio-text-secondary); margin-bottom: 20px; line-height: 1.55; max-width: 640px; }
+.navio-page-subtitle { font-size: 14px; color: var(--navio-text-secondary); margin-bottom: 12px; line-height: 1.5; max-width: 640px; }
 .navio-section-label {
     font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.10em; text-transform: uppercase;
-    color: var(--navio-text-secondary); font-weight: 600; margin: 30px 0 12px;
+    color: var(--navio-text-secondary); font-weight: 600; margin: 16px 0 9px;
 }
 /* ---- Generic elevated card wrapper (applied via elem_classes) ---- */
 .navio-card {
@@ -583,9 +586,9 @@ footer { display: none !important; }   /* hide "Built with Gradio" for the SaaS 
     box-shadow: 0 4px 12px var(--navio-accent-ring) !important;
     /* Don't let equal_height stretch the button to the full row height. */
     min-height: 0 !important;
-    height: 46px !important;
+    height: 40px !important;
     align-self: center !important;
-    min-width: 104px !important;
+    min-width: 100px !important;
 }
 /* Vertically center the agenda-row columns so the compact button lines up
    with the middle of the appointment card next to it. */
