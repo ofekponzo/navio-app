@@ -581,7 +581,15 @@ footer { display: none !important; }   /* hide "Built with Gradio" for the SaaS 
     border-radius: 10px !important;
     font-size: 13px !important;
     box-shadow: 0 4px 12px var(--navio-accent-ring) !important;
+    /* Don't let equal_height stretch the button to the full row height. */
+    min-height: 0 !important;
+    height: 46px !important;
+    align-self: center !important;
+    min-width: 104px !important;
 }
+/* Vertically center the agenda-row columns so the compact button lines up
+   with the middle of the appointment card next to it. */
+#navio_main_content .navio-agenda-row { align-items: center !important; }
 #navio_main_content .navio-agenda-open-btn:hover, #navio_main_content .navio-agenda-open-btn button:hover {
     background: var(--navio-accent-hover) !important;
 }
@@ -629,6 +637,15 @@ button.secondary, .gradio-container button[class*="secondary"] {
 .gradio-container table tbody tr:hover { background: #f6f9fb !important; }
 /* ---- Plot cards: let the chart sit flush inside the white card ---- */
 .gradio-container .plot-container, .gradio-container .js-plotly-plot { background: transparent !important; }
+/* Any block nested INSIDE a .navio-card (a Plot, an image, a textbox wrapper,
+   the calendar HTML) must be flush — no inner border/fill/shadow. This kills
+   the dark frame around Graph 2 and the gray band behind the calendar. The
+   card itself keeps its own border/shadow (set with !important above). */
+.navio-card .block, .navio-card .form, .navio-card .wrap,
+.navio-card .image-container, .navio-card [class*="plot"], .navio-card .gr-group {
+    background: transparent !important; border: none !important; box-shadow: none !important;
+}
+.gradio-container img { border: none !important; box-shadow: none !important; }
 """
 # ==============================================================================
 # Layout
