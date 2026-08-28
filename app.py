@@ -460,14 +460,45 @@ CUSTOM_CSS = """
     --font-body: 'Hanken Grotesk', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 }
-/* ---- Global ground + strip Gradio's default panel chrome ---- */
+/* ---- Override Gradio's OWN theme tokens. This is the real fix for the
+   default gray group/block/panel fills — retargeting the CSS variables clears
+   them everywhere at once, which is far more reliable than chasing Gradio's
+   internal class names version by version. ---- */
+.gradio-container, .gradio-container .gradio-container {
+    --body-background-fill: var(--navio-bg);
+    --background-fill-primary: var(--navio-card);
+    --background-fill-secondary: var(--navio-bg);
+    --block-background-fill: transparent;
+    --block-border-color: transparent;
+    --block-border-width: 0px;
+    --block-shadow: none;
+    --panel-background-fill: transparent;
+    --panel-border-color: transparent;
+    --border-color-primary: var(--navio-border);
+    --input-background-fill: #fbfcfe;
+    --input-border-color: var(--navio-border);
+    --body-text-color: var(--navio-text);
+    --body-text-color-subdued: var(--navio-text-secondary);
+    --button-primary-background-fill: var(--navio-accent);
+    --button-primary-background-fill-hover: var(--navio-accent-hover);
+    --button-primary-text-color: #ffffff;
+    --button-primary-border-color: var(--navio-accent);
+    --button-secondary-background-fill: #ffffff;
+    --button-secondary-border-color: var(--navio-border-strong);
+    --button-secondary-text-color: var(--navio-text);
+    --font: var(--font-body);
+}
 .gradio-container {
     background: var(--navio-bg) !important;
     font-family: var(--font-body) !important;
 }
 .gradio-container * { font-family: var(--font-body); }
-.gradio-container .gr-panel, .gradio-container .form, .gradio-container .block {
-    border: none !important; box-shadow: none !important; background: transparent !important;
+/* Belt-and-suspenders: keep any residual block/form/wrap fills transparent so
+   the page ground shows behind the elevated .navio-card surfaces. No
+   !important here, so .navio-card's white (which HAS !important) always wins. */
+.gradio-container .block, .gradio-container .form, .gradio-container .wrap,
+.gradio-container .gr-group, .gradio-container .panel, .gradio-container .gr-panel {
+    background: transparent; border: none; box-shadow: none;
 }
 footer { display: none !important; }   /* hide "Built with Gradio" for the SaaS look */
 /* ---- Clean separation between sidebar and main content ---- */
@@ -490,8 +521,12 @@ footer { display: none !important; }   /* hide "Built with Gradio" for the SaaS 
     padding: 4px 12px 24px;
 }
 .navio-brand-box span { color: var(--navio-accent); }
-/* Nav items: dark-on-light, soft teal pill when active */
-.navio-nav-btn button {
+/* Nav items: dark-on-light, soft teal pill when active. TWO fixes here vs the
+   first attempt: (1) elem_classes lands on the <button> itself in this Gradio,
+   so we target the class directly AND a descendant button; (2) we prefix with
+   #navio_sidebar so these beat Gradio's higher-specificity `button.secondary`
+   default (which was forcing the white outlined look). */
+#navio_sidebar .navio-nav-btn, #navio_sidebar .navio-nav-btn button {
     background: transparent !important;
     color: var(--navio-text-secondary) !important;
     border: 1px solid transparent !important;
@@ -504,8 +539,10 @@ footer { display: none !important; }   /* hide "Built with Gradio" for the SaaS 
     font-size: 14.5px !important;
     transition: background 0.15s ease, color 0.15s ease !important;
 }
-.navio-nav-btn button:hover { background: #f3f6f9 !important; color: var(--navio-text) !important; }
-.navio-nav-btn-active button {
+#navio_sidebar .navio-nav-btn:hover, #navio_sidebar .navio-nav-btn button:hover {
+    background: #f3f6f9 !important; color: var(--navio-text) !important;
+}
+#navio_sidebar .navio-nav-btn-active, #navio_sidebar .navio-nav-btn-active button {
     background: var(--navio-accent-soft) !important;
     color: var(--navio-accent-strong) !important;
     border: 1px solid rgba(14,165,169,0.18) !important;
@@ -534,7 +571,9 @@ footer { display: none !important; }   /* hide "Built with Gradio" for the SaaS 
 /* ---- Calendar day-strip + agenda list ---- */
 .navio-calendar-scroll { max-height: 420px; overflow-y: auto; }
 .navio-agenda-row { align-items: center !important; }
-.navio-agenda-open-btn button {
+/* Same two fixes as the nav buttons: target the class directly, and prefix
+   with #navio_main_content to beat `button.secondary`. */
+#navio_main_content .navio-agenda-open-btn, #navio_main_content .navio-agenda-open-btn button {
     background: var(--navio-accent) !important;
     border: none !important;
     color: #fff !important;
@@ -543,7 +582,9 @@ footer { display: none !important; }   /* hide "Built with Gradio" for the SaaS 
     font-size: 13px !important;
     box-shadow: 0 4px 12px var(--navio-accent-ring) !important;
 }
-.navio-agenda-open-btn button:hover { background: var(--navio-accent-hover) !important; }
+#navio_main_content .navio-agenda-open-btn:hover, #navio_main_content .navio-agenda-open-btn button:hover {
+    background: var(--navio-accent-hover) !important;
+}
 /* ---- Primary action buttons throughout ---- */
 button.primary, .gradio-container button[class*="primary"] {
     background: var(--navio-accent) !important;
@@ -592,7 +633,7 @@ button.secondary, .gradio-container button[class*="secondary"] {
 # ==============================================================================
 # Layout
 # ==============================================================================
-with gr.Blocks(title="NavIO") as demo:
+with gr.Blocks(title="NavIO", css=CUSTOM_CSS) as demo:
     app_state = gr.State(value=default_state())
     # --- Login screen ---------------------------------------------------
     with gr.Group(visible=True) as login_group:
@@ -801,4 +842,6 @@ with gr.Blocks(title="NavIO") as demo:
 if __name__ == "__main__":
     if HAS_SPACES:
         _zerogpu_startup_probe()  # registers the dummy GPU function so ZeroGPU's startup check passes
-    demo.launch(css=CUSTOM_CSS)
+    demo.launch()  # NOTE: css is set on gr.Blocks(...) above — NOT here. On HF
+    # Spaces, this launch() call does not run (HF launches the `demo` object
+    # itself), so any css passed here would be silently dropped.
