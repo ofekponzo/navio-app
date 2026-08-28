@@ -349,21 +349,20 @@ def _parse_slot_time(time_str):
         return None
 def _overview_stat(value, label):
     return f"""
-    <div style="min-width:88px;">
-        <div style="font-family:{FONT_BODY}; font-size:26px; font-weight:800; color:{COLOR_TEXT_PRIMARY};
+    <div style="min-width:76px;">
+        <div style="font-family:{FONT_BODY}; font-size:22px; font-weight:800; color:{COLOR_TEXT_PRIMARY};
                     letter-spacing:-0.02em; line-height:1;">{value}</div>
-        <div style="font-family:{FONT_MONO}; font-size:10px; letter-spacing:0.08em; text-transform:uppercase;
-                    color:{COLOR_TEXT_MUTED}; margin-top:6px; font-weight:600;">{label}</div>
+        <div style="font-family:{FONT_MONO}; font-size:9.5px; letter-spacing:0.08em; text-transform:uppercase;
+                    color:{COLOR_TEXT_MUTED}; margin-top:5px; font-weight:600;">{label}</div>
     </div>"""
 def build_calendar_strip_html(schedule):
-    """A clean, compact 'day at a glance': a small stat row (total / completed
-    / upcoming / next-up) followed by a horizontal wrap of tidy appointment
-    chips — replaces the former tall gray hour-grid, which read as empty and
-    unpolished. The detailed, actionable list lives in 'Today's Appointments'
-    below (with the real gr.Button per row); this block is overview only."""
+    """A slim one-line 'day at a glance' summary — total / completed / upcoming
+    / next-up. Deliberately compact (no hour-grid, no duplicate chip list) so
+    the whole Dashboard fits on one screen without scrolling; the detailed,
+    actionable appointments live in 'Today's Appointments' below."""
     if not schedule:
         return (
-            f'<div style="color:{COLOR_TEXT_MUTED}; padding:10px 2px; font-size:13.5px;">'
+            f'<div style="color:{COLOR_TEXT_MUTED}; padding:6px 2px; font-size:13.5px;">'
             f'No appointments scheduled for today.</div>'
         )
     total = len(schedule)
@@ -371,32 +370,14 @@ def build_calendar_strip_html(schedule):
     upcoming = total - completed
     next_appt = next((e for e in schedule if e.get("Status") != "Completed"), None)
     next_time = next_appt.get("Time", "—") if next_appt else "—"
-    stats = (
-        f'<div style="display:flex; gap:34px; flex-wrap:wrap; padding:4px 2px 20px; '
-        f'border-bottom:1px solid {COLOR_BORDER}; margin-bottom:18px;">'
+    return (
+        f'<div style="display:flex; gap:38px; flex-wrap:wrap; padding:2px;">'
         f'{_overview_stat(str(total), "Appointments")}'
         f'{_overview_stat(str(completed), "Completed")}'
         f'{_overview_stat(str(upcoming), "Upcoming")}'
         f'{_overview_stat(next_time, "Next up")}'
         f'</div>'
     )
-    chips = []
-    for entry in schedule:
-        status = entry.get("Status", "Scheduled")
-        status_color, status_soft = STATUS_COLORS.get(status, (COLOR_TEXT_SECONDARY, COLOR_BG))
-        chips.append(f"""
-        <div style="display:flex; align-items:center; gap:11px; background:{COLOR_CARD};
-                    border:1px solid {COLOR_BORDER}; border-radius:12px; padding:11px 15px; min-width:158px;
-                    box-shadow:0 2px 8px rgba(16,34,59,0.04);">
-            <span style="width:9px; height:9px; border-radius:50%; background:{status_color}; flex:none;
-                         box-shadow:0 0 0 4px {status_soft};"></span>
-            <div>
-                <div style="font-family:{FONT_MONO}; font-size:12.5px; font-weight:700; color:{COLOR_TEXT_PRIMARY};">{entry.get('Time', '—')}</div>
-                <div style="font-size:12.5px; color:{COLOR_TEXT_SECONDARY}; margin-top:1px;">{entry.get('Patient_ID', '—')}</div>
-            </div>
-        </div>""")
-    chips_html = f'<div style="display:flex; gap:12px; flex-wrap:wrap;">{"".join(chips)}</div>'
-    return stats + chips_html
 def format_agenda_row_html(entry):
     """The interactive counterpart to the calendar strip above — same time/
     status color coding, rendered as an ordinary card next to a real
@@ -404,20 +385,19 @@ def format_agenda_row_html(entry):
     stays a genuine Gradio click handler rather than an HTML onclick."""
     status = entry.get("Status", "Scheduled")
     status_color, status_soft = STATUS_COLORS.get(status, (COLOR_TEXT_SECONDARY, COLOR_BG))
+    # Single-line, compact row so the full day's list fits without scrolling.
     return f"""
     <div style="display:flex; align-items:center; justify-content:space-between; gap:16px;
-                background:{COLOR_CARD}; border:1px solid {COLOR_BORDER}; border-radius:14px;
-                padding:13px 18px; box-shadow:0 3px 10px rgba(16,34,59,0.04);">
-        <div style="display:flex; align-items:center; gap:16px;">
+                background:{COLOR_CARD}; border:1px solid {COLOR_BORDER}; border-radius:12px;
+                padding:9px 18px; box-shadow:0 2px 8px rgba(16,34,59,0.04);">
+        <div style="display:flex; align-items:center; gap:20px;">
             <div style="font-family:{FONT_MONO}; font-size:13.5px; font-weight:700; color:{COLOR_TEXT_PRIMARY};
-                        min-width:56px;">{entry.get('Time', '—')}</div>
-            <div>
-                <div style="font-size:14px; font-weight:700; color:{COLOR_TEXT_PRIMARY};">{entry.get('Patient_ID', '—')}</div>
-                <div style="font-size:11px; color:{COLOR_TEXT_MUTED}; margin-top:1px;">Outpatient psychotherapy</div>
-            </div>
+                        min-width:52px;">{entry.get('Time', '—')}</div>
+            <div style="font-size:14px; font-weight:700; color:{COLOR_TEXT_PRIMARY};">{entry.get('Patient_ID', '—')}</div>
+            <div style="font-size:12px; color:{COLOR_TEXT_MUTED};">Outpatient psychotherapy</div>
         </div>
-        <div style="background:{status_soft}; color:{status_color}; font-family:{FONT_MONO}; font-size:10.5px;
-                    font-weight:700; padding:5px 11px; border-radius:999px; letter-spacing:0.05em;">{status.upper()}</div>
+        <div style="background:{status_soft}; color:{status_color}; font-family:{FONT_MONO}; font-size:10px;
+                    font-weight:700; padding:4px 11px; border-radius:999px; letter-spacing:0.05em;">{status.upper()}</div>
     </div>"""
 def no_schedule_html():
     return f"""
