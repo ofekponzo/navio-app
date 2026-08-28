@@ -124,14 +124,16 @@ def _ring_card(label, pct, display_value, color):
 # KPI / metric cards
 # ==============================================================================
 def _card(label, value, accent=COLOR_ACCENT):
+    # `accent` is kept for call-site compatibility, but the redesigned card is
+    # a clean, UNIFORM white surface (no colored top-border) to match the
+    # reference mockup — the former per-card colored borders read as clutter.
     return f"""
     <div style="flex:1; min-width:150px; background:{COLOR_CARD}; border:1px solid {COLOR_BORDER};
-                border-radius:14px; padding:15px 17px; box-shadow:0 4px 14px rgba(16,34,59,0.05);
-                border-top:3px solid {accent};">
+                border-radius:14px; padding:16px 18px; box-shadow:0 4px 14px rgba(16,34,59,0.05);">
         <div style="font-family:{FONT_MONO}; font-size:10px; color:{COLOR_TEXT_MUTED}; text-transform:uppercase;
                     letter-spacing:0.09em; font-weight:600;">{label}</div>
         <div style="font-family:{FONT_BODY}; font-size:22px; font-weight:800; color:{COLOR_TEXT_PRIMARY};
-                    margin-top:5px; letter-spacing:-0.01em;">{value}</div>
+                    margin-top:6px; letter-spacing:-0.01em;">{value}</div>
     </div>"""
 def format_metric_cards_html(session_like):
     """Accepts EITHER recsys.analyze_new_session()'s live output dict OR a
@@ -345,46 +347,56 @@ def _parse_slot_time(time_str):
         return int(hour_str), int(minute_str)
     except (ValueError, AttributeError):
         return None
+def _overview_stat(value, label):
+    return f"""
+    <div style="min-width:88px;">
+        <div style="font-family:{FONT_BODY}; font-size:26px; font-weight:800; color:{COLOR_TEXT_PRIMARY};
+                    letter-spacing:-0.02em; line-height:1;">{value}</div>
+        <div style="font-family:{FONT_MONO}; font-size:10px; letter-spacing:0.08em; text-transform:uppercase;
+                    color:{COLOR_TEXT_MUTED}; margin-top:6px; font-weight:600;">{label}</div>
+    </div>"""
 def build_calendar_strip_html(schedule):
-    """One self-contained HTML/CSS visualization of the day: hour gridlines
-    + labels, and a colored, time-positioned chip per appointment."""
-    total_minutes = (CALENDAR_END_HOUR - CALENDAR_START_HOUR) * 60
-    height_px = (CALENDAR_END_HOUR - CALENDAR_START_HOUR) * CALENDAR_PX_PER_HOUR
-    rails = []
-    for hour in range(CALENDAR_START_HOUR, CALENDAR_END_HOUR + 1):
-        top = (hour - CALENDAR_START_HOUR) * CALENDAR_PX_PER_HOUR
-        rails.append(
-            f'<div style="position:absolute; top:{top}px; left:0; right:0; border-top:1px solid {COLOR_BORDER};"></div>'
-            f'<div style="position:absolute; top:{top - 7}px; left:0; font-family:{FONT_MONO}; font-size:10px; '
-            f'color:{COLOR_TEXT_MUTED};">{hour:02d}:00</div>'
+    """A clean, compact 'day at a glance': a small stat row (total / completed
+    / upcoming / next-up) followed by a horizontal wrap of tidy appointment
+    chips — replaces the former tall gray hour-grid, which read as empty and
+    unpolished. The detailed, actionable list lives in 'Today's Appointments'
+    below (with the real gr.Button per row); this block is overview only."""
+    if not schedule:
+        return (
+            f'<div style="color:{COLOR_TEXT_MUTED}; padding:10px 2px; font-size:13.5px;">'
+            f'No appointments scheduled for today.</div>'
         )
+    total = len(schedule)
+    completed = sum(1 for e in schedule if e.get("Status") == "Completed")
+    upcoming = total - completed
+    next_appt = next((e for e in schedule if e.get("Status") != "Completed"), None)
+    next_time = next_appt.get("Time", "—") if next_appt else "—"
+    stats = (
+        f'<div style="display:flex; gap:34px; flex-wrap:wrap; padding:4px 2px 20px; '
+        f'border-bottom:1px solid {COLOR_BORDER}; margin-bottom:18px;">'
+        f'{_overview_stat(str(total), "Appointments")}'
+        f'{_overview_stat(str(completed), "Completed")}'
+        f'{_overview_stat(str(upcoming), "Upcoming")}'
+        f'{_overview_stat(next_time, "Next up")}'
+        f'</div>'
+    )
     chips = []
     for entry in schedule:
-        parsed = _parse_slot_time(entry.get("Time", ""))
-        if parsed is None:
-            continue
-        hour, minute = parsed
-        start_offset_min = (hour - CALENDAR_START_HOUR) * 60 + minute
-        if not (0 <= start_offset_min <= total_minutes):
-            continue
-        top_px = start_offset_min / 60.0 * CALENDAR_PX_PER_HOUR
-        chip_height_px = max(30.0, CALENDAR_EVENT_MINUTES / 60.0 * CALENDAR_PX_PER_HOUR - 4)
         status = entry.get("Status", "Scheduled")
         status_color, status_soft = STATUS_COLORS.get(status, (COLOR_TEXT_SECONDARY, COLOR_BG))
         chips.append(f"""
-        <div style="position:absolute; top:{top_px:.0f}px; left:52px; right:6px; height:{chip_height_px:.0f}px;
-                    background:{status_soft}; border-left:3px solid {status_color}; border-radius:8px;
-                    padding:5px 10px; box-sizing:border-box; overflow:hidden;">
-            <div style="font-family:{FONT_MONO}; font-size:10px; font-weight:700; color:{status_color};">{entry.get('Time', '—')}</div>
-            <div style="font-size:12.5px; font-weight:700; color:{COLOR_TEXT_PRIMARY}; white-space:nowrap;
-                        overflow:hidden; text-overflow:ellipsis;">{entry.get('Patient_ID', '—')}</div>
+        <div style="display:flex; align-items:center; gap:11px; background:{COLOR_CARD};
+                    border:1px solid {COLOR_BORDER}; border-radius:12px; padding:11px 15px; min-width:158px;
+                    box-shadow:0 2px 8px rgba(16,34,59,0.04);">
+            <span style="width:9px; height:9px; border-radius:50%; background:{status_color}; flex:none;
+                         box-shadow:0 0 0 4px {status_soft};"></span>
+            <div>
+                <div style="font-family:{FONT_MONO}; font-size:12.5px; font-weight:700; color:{COLOR_TEXT_PRIMARY};">{entry.get('Time', '—')}</div>
+                <div style="font-size:12.5px; color:{COLOR_TEXT_SECONDARY}; margin-top:1px;">{entry.get('Patient_ID', '—')}</div>
+            </div>
         </div>""")
-    return f"""
-    <div style="position:relative; height:{height_px}px; margin-left:44px; padding-bottom:4px;
-                border-left:1px solid {COLOR_BORDER};">
-        {''.join(rails)}
-        {''.join(chips)}
-    </div>"""
+    chips_html = f'<div style="display:flex; gap:12px; flex-wrap:wrap;">{"".join(chips)}</div>'
+    return stats + chips_html
 def format_agenda_row_html(entry):
     """The interactive counterpart to the calendar strip above — same time/
     status color coding, rendered as an ordinary card next to a real
