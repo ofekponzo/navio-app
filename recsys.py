@@ -1,7 +1,7 @@
 """
 NavIO — recsys.py
 Retrieval, feature engineering, and classification/regression pipeline.
-
+ 
 Ported from Part 3 (navio_part3_final.py). Two Space-specific changes from
 the Colab version:
 
