@@ -74,4 +74,4 @@ def generate_mock_schedule(doctor_id, assigned_patient_ids, max_slots=8):
             "Patient_ID": patient_id,
             "Status": status,
         })
-    return schedule
+    return schedule 
