@@ -8,4 +8,4 @@ huggingface_hub
 joblib
 pandas
 numpy
-matplotlib
+matplotlib 
