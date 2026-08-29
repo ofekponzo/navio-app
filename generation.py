@@ -467,7 +467,7 @@ def generate_clinical_outputs(session_result, transcript):
         user_content=build_strategy_prompt(session_result),
         max_tokens=300, temperature=0.65,
     )
-
+ 
     return {
         "Medical_Necessity_Justification": justification,
         "Next_Session_Strategy": strategy,
