@@ -439,24 +439,27 @@ def build_quick_starters():
 CUSTOM_CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@500;600;700&display=swap');
 :root {
-    --navio-bg:            #f6f8fb;   /* very light off-white ground   */
+    --navio-bg:            #f4f7f8;   /* near-white clinical ground     */
     --navio-card:          #ffffff;   /* pure white elevated cards      */
-    --navio-border:        #e8edf3;
-    --navio-border-strong: #dbe3ec;
-    --navio-text:          #16233d;   /* deep navy ink                  */
-    --navio-text-secondary:#5c6b81;
-    --navio-text-muted:    #93a1b4;
-    --navio-accent:        #0ea5a9;   /* BRAND TEAL — actions only      */
-    --navio-accent-hover:  #0c8f93;
-    --navio-accent-strong: #0a7b7e;
-    --navio-accent-soft:   #e6f6f6;   /* teal wash for active states    */
-    --navio-accent-ring:   rgba(14,165,169,0.16);
+    --navio-border:        #e7ebee;
+    --navio-border-strong: #d8dee3;
+    --navio-text:          #0b0b0c;   /* LOGO BLACK ink                 */
+    --navio-text-secondary:#5a6470;
+    --navio-text-muted:    #9aa3ad;
+    --navio-accent:        #16d6d1;   /* LOGO CYAN — actions only       */
+    --navio-accent-hover:  #0fbfba;
+    --navio-accent-strong: #0a8f8c;   /* readable cyan for text on soft */
+    --navio-accent-soft:   #e2fbfa;   /* cyan wash for active states    */
+    --navio-accent-ring:   rgba(22,214,209,0.20);
+    /* Cyan is bright: label text on a solid cyan fill must be logo black,
+       never white, or primary buttons fail contrast. */
+    --navio-on-accent:     #0b0b0c;
     /* Semantic colors — deliberately NOT the accent, for clinical state */
     --navio-good:  #17a673;  --navio-good-soft:  #e6f6ef;
     --navio-warn:  #e08a1e;  --navio-warn-soft:  #fdf1e0;
     --navio-crit:  #e0483c;  --navio-crit-soft:  #fdeceb;
-    --navio-secondary: #3b6fe0;
-    --navio-shadow: 0 1px 2px rgba(16,35,61,0.04), 0 6px 20px rgba(16,35,61,0.05);
+    --navio-secondary: #475569;
+    --navio-shadow: 0 1px 2px rgba(11,11,12,0.04), 0 6px 20px rgba(11,11,12,0.06);
     --font-body: 'Hanken Grotesk', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 }
@@ -481,7 +484,7 @@ CUSTOM_CSS = """
     --body-text-color-subdued: var(--navio-text-secondary);
     --button-primary-background-fill: var(--navio-accent);
     --button-primary-background-fill-hover: var(--navio-accent-hover);
-    --button-primary-text-color: #ffffff;
+    --button-primary-text-color: var(--navio-on-accent);
     --button-primary-border-color: var(--navio-accent);
     --button-secondary-background-fill: #ffffff;
     --button-secondary-border-color: var(--navio-border-strong);
@@ -548,7 +551,7 @@ footer { display: none !important; }   /* hide "Built with Gradio" for the SaaS 
 #navio_sidebar .navio-nav-btn-active, #navio_sidebar .navio-nav-btn-active button {
     background: var(--navio-accent-soft) !important;
     color: var(--navio-accent-strong) !important;
-    border: 1px solid rgba(14,165,169,0.18) !important;
+    border: 1px solid rgba(22,214,209,0.28) !important;
 }
 .navio-sidebar-footer {
     margin-top: auto !important; padding: 16px 12px 4px !important;
@@ -579,7 +582,7 @@ footer { display: none !important; }   /* hide "Built with Gradio" for the SaaS 
 #navio_main_content .navio-agenda-open-btn, #navio_main_content .navio-agenda-open-btn button {
     background: var(--navio-accent) !important;
     border: none !important;
-    color: #fff !important;
+    color: var(--navio-on-accent) !important;
     font-weight: 700 !important;
     border-radius: 10px !important;
     font-size: 13px !important;
@@ -600,7 +603,7 @@ footer { display: none !important; }   /* hide "Built with Gradio" for the SaaS 
 button.primary, .gradio-container button[class*="primary"] {
     background: var(--navio-accent) !important;
     border: none !important;
-    color: #fff !important;
+    color: var(--navio-on-accent) !important;
     border-radius: 10px !important;
     font-weight: 700 !important;
     box-shadow: 0 4px 12px var(--navio-accent-ring) !important;
