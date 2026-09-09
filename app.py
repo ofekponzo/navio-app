@@ -574,6 +574,36 @@ footer { display: none !important; }   /* hide "Built with Gradio" for the SaaS 
     padding: 22px !important;
     box-shadow: var(--navio-shadow) !important;
 }
+/* ---- Reference three-column workspace (Patients page) ----
+   The three columns are each a .navio-card, so they read as the reference's
+   distinct panels. align-items:flex-start stops Gradio stretching the short
+   rail to match the tall canvas. ---- */
+.navio-workspace { gap: 16px !important; align-items: flex-start !important; }
+.navio-workspace > .navio-card { padding: 18px !important; }
+/* The center canvas owns the page's visual weight. */
+.navio-canvas-title {
+    font-size: 22px; font-weight: 800; color: var(--navio-text);
+    letter-spacing: -0.02em; margin: 2px 0 14px;
+}
+.navio-insights-title {
+    font-size: 15px; font-weight: 800; color: var(--navio-text);
+    letter-spacing: -0.01em; margin: 2px 0 12px;
+    padding-bottom: 12px; border-bottom: 1px solid var(--navio-border);
+}
+/* The rail's own stacked blocks sit flush — the column IS the card. */
+.navio-rail .block, .navio-canvas .block, .navio-insights .block,
+.navio-rail .form, .navio-canvas .form, .navio-insights .form {
+    background: transparent !important; border: none !important; box-shadow: none !important;
+}
+/* Keep the insights feed from growing taller than the canvas next to it. */
+.navio-insights { max-height: 82vh; overflow-y: auto; }
+.navio-insights table { font-size: 12px !important; }
+.navio-insights table td, .navio-insights table th { padding: 8px 10px !important; }
+/* Thin cyan rule across the very top, as in the reference. */
+.gradio-container::before {
+    content: ""; display: block; height: 4px; width: 100%;
+    background: var(--navio-accent); border-radius: 2px; margin-bottom: 14px;
+}
 /* ---- Calendar day-strip + agenda list ---- */
 .navio-calendar-scroll { max-height: 420px; overflow-y: auto; }
 .navio-agenda-row { align-items: center !important; }
@@ -710,49 +740,47 @@ with gr.Blocks(title="NavIO", css=CUSTOM_CSS) as demo:
                         'session from their history to inspect its full record. Nothing here re-runs the '
                         'trained models; every value is read from the stored dataset or this session\'s log.</div>'
                     )
-                    with gr.Row(elem_classes=["navio-card"], equal_height=True):
-                        with gr.Column(scale=3):
+                    # ---- Reference three-column workspace: a narrow patient
+                    # rail, a wide central data canvas, and a right-hand
+                    # insights column. Every component below is the SAME object
+                    # the event handlers already reference — only its position
+                    # in the layout tree changed. ----
+                    with gr.Row(equal_height=False, elem_classes=["navio-workspace"]):
+                        # ---- LEFT RAIL: identity, metadata, highlights ----
+                        with gr.Column(scale=3, min_width=230, elem_classes=["navio-card", "navio-rail"]):
                             patient_selector = gr.Dropdown(
                                 label="Select Patient", choices=[], value=None,
                                 allow_custom_value=False, filterable=True,
                             )
-                        with gr.Column(scale=2):
+                            profile_summary_html = gr.HTML(value=ui_helpers.format_patient_summary_html(None, []))
                             with gr.Accordion("Register New Patient (Intake)", open=False):
                                 new_patient_id_box = gr.Textbox(label="New Patient ID", placeholder="e.g. P_NEW_001")
                                 register_button = gr.Button("Register")
                                 register_error = gr.Markdown(value="", visible=False)
-                    # ---- Patient Summary Header ----
-                    with gr.Group(elem_classes=["navio-card"]):
-                        profile_summary_html = gr.HTML(value=ui_helpers.format_patient_summary_html(None, []))
-                    # ---- Interactive Session History Table + Graph 1 ----
-                    with gr.Row(equal_height=True):
-                        with gr.Column(scale=2, elem_classes=["navio-card"]):
+                        # ---- CENTER: the data canvas ----
+                        with gr.Column(scale=6, min_width=340, elem_classes=["navio-card", "navio-canvas"]):
+                            gr.HTML('<div class="navio-canvas-title">Overview Data</div>')
+                            profile_trajectory_plot = gr.Plot(label="Graph 1 — Cross-Session Progress & Trajectory")
+                            # Selecting a session (table row OR dropdown) swaps
+                            # the empty state for this block, inline — no modal.
+                            gr.HTML('<div class="navio-section-label">Session Detail</div>')
+                            profile_detail_empty = gr.HTML(value=ui_helpers.no_session_selected_html())
+                            with gr.Group(visible=False) as profile_detail_group:
+                                profile_detail_cards = gr.HTML()
+                                profile_detail_summary = gr.HTML()
+                                profile_detail_graph2 = gr.Plot(label="Graph 2 — Intra-Session Clinical Timeline")
+                                gr.HTML('<div class="navio-section-label">Document &amp; Billing</div>')
+                                profile_detail_justification = gr.Textbox(label="Medical Necessity Justification", lines=6, interactive=False)
+                                profile_detail_cpt_badge = gr.HTML()
+                                profile_detail_strategy = gr.HTML()
+                        # ---- RIGHT: session history / insights feed ----
+                        with gr.Column(scale=3, min_width=220, elem_classes=["navio-card", "navio-insights"]):
+                            gr.HTML('<div class="navio-insights-title">Patient Insights</div>')
                             profile_history_df = gr.Dataframe(headers=ui_helpers.HISTORY_TABLE_COLUMNS, interactive=False)
                             session_inspector = gr.Dropdown(
                                 label="Select Session to Inspect", choices=[], value=None, allow_custom_value=False,
                             )
                             add_session_profile_btn = gr.Button("Add New Session", variant="primary")
-                        with gr.Column(scale=1, elem_classes=["navio-card"]):
-                            profile_trajectory_plot = gr.Plot(label="Graph 1 — Cross-Session Progress & Trajectory")
-                    # ---- Step 2: Historical Session Inspector (Deep-Dive) ----
-                    # No popup/modal: selecting a session (table row OR the
-                    # dropdown above) swaps the empty-state message below for
-                    # this block, rendered inline on this same page.
-                    gr.HTML('<div class="navio-section-label">Session Detail</div>')
-                    profile_detail_empty = gr.HTML(value=ui_helpers.no_session_selected_html())
-                    with gr.Group(visible=False) as profile_detail_group:
-                        with gr.Group(elem_classes=["navio-card"]):
-                            profile_detail_cards = gr.HTML()
-                        profile_detail_summary = gr.HTML()
-                        with gr.Group(elem_classes=["navio-card"]):
-                            profile_detail_graph2 = gr.Plot(label="Graph 2 — Intra-Session Clinical Timeline")
-                        gr.HTML('<div class="navio-section-label">Document &amp; Billing</div>')
-                        with gr.Row(equal_height=True):
-                            with gr.Column(scale=2, elem_classes=["navio-card"]):
-                                profile_detail_justification = gr.Textbox(label="Medical Necessity Justification", lines=6, interactive=False)
-                            with gr.Column(scale=1, elem_classes=["navio-card"]):
-                                profile_detail_cpt_badge = gr.HTML()
-                        profile_detail_strategy = gr.HTML()
                 # ---- Sessions page (the analysis workspace) ----
                 with gr.Group(visible=False) as sessions_page:
                     gr.HTML('<div class="navio-page-title">New Session — Analysis &amp; Documentation</div>')
