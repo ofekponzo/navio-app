@@ -1,0 +1,12 @@
+{
+  "previewPort": 3000,
+  "healthPath": "/",
+  "startCommand": "docker compose -f docker-compose.base44.yml up -d",
+  "secrets": [
+    {
+      "name": "HF_TOKEN",
+      "description": "Hugging Face access token (https://huggingface.co/settings/tokens) with Inference API permission. Optional: without it the app boots and runs, but the two GenAI clinical notes (Medical Necessity Justification, Next-Session Strategy) are templated mock text instead of Llama-3.1-8B output.",
+      "requiredAtBoot": false
+    }
+  ]
+}
