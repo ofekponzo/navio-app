@@ -39,23 +39,25 @@ import pandas as pd
 # HTML (cards, badges, calendar) and pure-CSS-styled Gradio components read as
 # one consistent system. Palette + type choices are matched to the light,
 # whitespace-heavy clinical-SaaS aesthetic the app is styled after: pure-white
-# elevated cards on a very light off-white ground, a teal primary accent used
+# elevated cards on a very light off-white ground, the NavIO logo's cyan accent used
 # for actions / active states / key data points ONLY, and IBM Plex Mono
 # reserved for uppercase labels / data figures (Hanken Grotesk carries all
 # body text). green/amber/red are reserved for clinical STATE — never the
 # accent. Every value below mirrors a --navio-* CSS variable in app.py.
 # ==============================================================================
-COLOR_BG = "#f6f8fb"
+COLOR_BG = "#f4f7f8"
 COLOR_CARD = "#ffffff"
-COLOR_BORDER = "#e8edf3"
-COLOR_TEXT_PRIMARY = "#16233d"
-COLOR_TEXT_SECONDARY = "#5c6b81"
-COLOR_TEXT_MUTED = "#93a1b4"
-COLOR_ACCENT = "#0ea5a9"        # teal — primary actions, positive/synced status
-COLOR_ACCENT_HOVER = "#0c8f93"
-COLOR_ACCENT_SOFT = "#e6f6f6"
-COLOR_SECONDARY = "#3b6fe0"     # blue — secondary data accent
-COLOR_SECONDARY_SOFT = "#eef4ff"
+COLOR_BORDER = "#e7ebee"
+COLOR_TEXT_PRIMARY = "#0b0b0c"  # logo black
+COLOR_TEXT_SECONDARY = "#5a6470"
+COLOR_TEXT_MUTED = "#9aa3ad"
+COLOR_ACCENT = "#16d6d1"        # LOGO CYAN — primary actions, key data points
+COLOR_ACCENT_HOVER = "#0fbfba"
+COLOR_ACCENT_STRONG = "#0a8f8c"  # darkened cyan, for accent-colored TEXT
+COLOR_ACCENT_SOFT = "#e2fbfa"
+COLOR_ON_ACCENT = "#0b0b0c"     # label color on a solid cyan fill
+COLOR_SECONDARY = "#475569"     # slate — secondary data accent
+COLOR_SECONDARY_SOFT = "#eef1f5"
 COLOR_SUCCESS = "#17a673"
 COLOR_SUCCESS_SOFT = "#e6f6ef"
 COLOR_SUCCESS_TEXT = "#0c7a4f"
@@ -66,13 +68,13 @@ COLOR_DANGER = "#e0483c"
 COLOR_DANGER_SOFT = "#fdeceb"
 COLOR_DANGER_TEXT = "#c23636"
 COLOR_SIDEBAR_BG = "#ffffff"    # sidebar is now LIGHT (styled in app.py CSS); kept for reference
-COLOR_SIDEBAR_BORDER = "#e8edf3"
+COLOR_SIDEBAR_BORDER = "#e7ebee"
 FONT_BODY = "'Hanken Grotesk', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
 FONT_MONO = "'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace"
 RISK_COLORS = {"Low": COLOR_SUCCESS_TEXT, "Medium": COLOR_WARNING_TEXT, "High": COLOR_DANGER_TEXT}
 RISK_SOFT = {"Low": COLOR_SUCCESS_SOFT, "Medium": COLOR_WARNING_SOFT, "High": COLOR_DANGER_SOFT}
 RISK_LINE = {"Low": COLOR_SUCCESS, "Medium": COLOR_WARNING, "High": COLOR_DANGER}
-CPT_COLORS = {"90832": "#546e7a", "90834": COLOR_SECONDARY, "90837": COLOR_ACCENT, "90839": COLOR_DANGER_TEXT}
+CPT_COLORS = {"90832": "#546e7a", "90834": COLOR_SECONDARY, "90837": COLOR_ACCENT_STRONG, "90839": COLOR_DANGER_TEXT}
 CPT_SOFT = {"90832": "#eceff1", "90834": COLOR_SECONDARY_SOFT, "90837": COLOR_ACCENT_SOFT, "90839": COLOR_DANGER_SOFT}
 STATUS_COLORS = {"Scheduled": (COLOR_SECONDARY, COLOR_SECONDARY_SOFT), "Completed": (COLOR_SUCCESS_TEXT, COLOR_SUCCESS_SOFT)}
 def risk_level_color(level):

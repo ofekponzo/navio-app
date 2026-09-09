@@ -26,6 +26,37 @@ HF_TOKEN = os.environ.get("HF_TOKEN")
 GENERATION_MODEL_ID = "meta-llama/Llama-3.1-8B-Instruct"
 client = InferenceClient(model=GENERATION_MODEL_ID, token=HF_TOKEN, timeout=120)
 
+# Without an HF_TOKEN the Inference API cannot be called; return clearly
+# labelled templated notes instead so the dashboard stays usable in dev.
+MOCK_GENERATION = not HF_TOKEN
+if MOCK_GENERATION:
+    print("[generation] HF_TOKEN not set — using MOCK clinical note generation.")
+
+
+def _mock_clinical_outputs(session_result):
+    r = session_result
+    crisis_note = (
+        " Acute crisis indicators were identified and addressed with immediate safety planning."
+        if r["Crisis_Flag"] else ""
+    )
+    justification = (
+        f"[MOCK — set HF_TOKEN for real generation] Patient {r['Patient_ID']} presents with "
+        f"{r['Primary_Diagnosis']}. This {r['Session_Duration_minutes']}-minute session "
+        f"({r['session_context'].replace('_', ' ')}) yielded a predicted risk score of "
+        f"{r['Predicted_Risk_Score']}/10 ({r['Risk_Level']} risk) with a {r['Predicted_Dynamic']} "
+        f"therapeutic dynamic; progress is assessed as {r['Progress']}.{crisis_note} Continued "
+        f"psychotherapy is medically necessary to reduce symptom burden and support functional "
+        f"recovery. CPT {r['Target_CPT_Code']} is supported by the documented duration and content."
+    )
+    strategy = (
+        f"[MOCK — set HF_TOKEN for real generation] Next session: review the {r['Risk_Level'].lower()}"
+        f"-risk presentation and reinforce coping strategies relevant to {r['Primary_Diagnosis']}. "
+        f"Monitor the {r['Predicted_Dynamic'].lower()} dynamic and revisit treatment goals given "
+        f"the '{r['Progress']}' trajectory."
+        + (" Begin with a structured safety check-in." if r["Crisis_Flag"] else "")
+    )
+    return justification, strategy
+
 MAX_RETRIES = 4
 BASE_BACKOFF_SECONDS = 3
 
@@ -453,6 +484,15 @@ def generate_clinical_outputs(session_result, transcript):
         session_result.get("Similar_Cases"),
     )
     session_result = {**session_result, "Primary_Diagnosis": diagnosis}
+
+    if MOCK_GENERATION:
+        justification, strategy = _mock_clinical_outputs(session_result)
+        return {
+            "Medical_Necessity_Justification": justification,
+            "Next_Session_Strategy": strategy,
+            "Primary_Diagnosis_Used": diagnosis,
+            "Primary_Diagnosis_Source": diagnosis_source,
+        }
 
     justification = _generate_with_refusal_guard(
         system_prompt=JUSTIFICATION_SYSTEM_PROMPT,

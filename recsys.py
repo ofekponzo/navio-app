@@ -40,7 +40,9 @@ from sklearn.preprocessing import normalize
 from transformers import pipeline as hf_pipeline
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ARTIFACT_DIR = os.path.join(BASE_DIR, "artifacts")
+# NAVIO_ARTIFACT_DIR lets a dev environment point at stand-in artifacts
+# (see scripts/make_mock_artifacts.py) when the Git LFS originals are absent.
+ARTIFACT_DIR = os.environ.get("NAVIO_ARTIFACT_DIR", os.path.join(BASE_DIR, "artifacts"))
 
 HF_DATASET_REPO_ID = "ofekponzo/navio-synthetic-dataset"
 MPNET_MODEL_ID = "sentence-transformers/all-mpnet-base-v2"
